@@ -18,6 +18,7 @@ from upordowntrader.api.http import RequestFailed
 from upordowntrader.common.log import log
 from upordowntrader.common.sources import SOURCES
 from upordowntrader.db import database
+from upordowntrader.history import load
 
 WORKERS = 4             # Days fetched at once.
 DEFAULT_DAYS = 400      # Days back from today the download starts by default: a year to score, and four weeks of warmup.
@@ -25,12 +26,13 @@ DEFAULT_DAYS = 400      # Days back from today the download starts by default: a
 
 def coinbase_day(day):
     """
-    One day of Coinbase's 1 minute BTC-USD candles, as bar tuples for database.store_day(). Coinbase does not count trades.
+    One day of Coinbase's 1 minute BTC-USD candles, as bar tuples for database.store_day(), up to now for today, which
+    Coinbase refuses to be asked past. Coinbase does not count trades.
     """
     symbol, seconds = SOURCES["coinbase"]
     start = datetime(day.year, day.month, day.day, tzinfo=UTC)
     return [(int(c.open_time.timestamp()), c.open, c.high, c.low, c.close, c.volume, None)
-            for c in coinbase.candles(symbol, seconds, start, start + timedelta(days=1))]
+            for c in coinbase.candles(symbol, seconds, start, min(start + timedelta(days=1), datetime.now(UTC)))]
 
 
 FETCHERS = {"coinbase": coinbase_day}
@@ -77,6 +79,16 @@ def download(conn, source, first, end, log=print, workers=WORKERS):
                 done += 1
                 log(f"{source} {day}: {len(bars):,} bars, {done}/{len(wanted)} days in {time.time() - t0:.0f}s")
     return done
+
+
+def recent_history(conn, first_day, end_day, log=print, source="coinbase"):
+    """
+    A source's History from first_day up to end_day, for pricing windows up to now: days not stored yet are downloaded
+    and stored first, and today's, still under way, is read from the source without storing.
+    """
+    download(conn, source, first_day, end_day, log)
+    today = datetime.now(UTC).date()
+    return load.load(conn, source, first_day, end_day, log, fetch=lambda day: fetch_day(source, day) if day >= today else None)
 
 
 # MAIN

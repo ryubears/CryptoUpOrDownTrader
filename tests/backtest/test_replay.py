@@ -7,6 +7,7 @@ import pytest
 from upordowntrader.backtest import replay
 from upordowntrader.db import database
 from upordowntrader.db.models import Market
+from upordowntrader.model import fair
 
 START = 1_000_000                       # The first second of the made up history.
 OPEN = START + 3600
@@ -30,9 +31,9 @@ def test_an_order_takes_every_level_within_the_threshold_that_is_still_there_whe
     (order,) = replay.take_edges(np.array([10.0]), np.array([0.70]), b, close_time=900, up=True)
     assert (order["side"], order["offered"], order["contracts"]) == ("yes", 150.0, 70.0)      # Up to the limit of 62 cents.
     assert order["price"] == pytest.approx((0.61 * 30 + 0.62 * 40) / 70)
-    assert order["expected"] == pytest.approx(30 * replay.edge(0.70, 0.61) + 40 * replay.edge(0.70, 0.62))
-    assert order["realized"] == pytest.approx(30 * (1 - 0.61 - replay.fee(0.61)) + 40 * (1 - 0.62 - replay.fee(0.62)))
-    assert order["one_contract"] == pytest.approx(1 - 0.61 - replay.fee(0.61))
+    assert order["expected"] == pytest.approx(30 * fair.edge(0.70, 0.61) + 40 * fair.edge(0.70, 0.62))
+    assert order["realized"] == pytest.approx(30 * fair.edge(1.0, 0.61) + 40 * fair.edge(1.0, 0.62))
+    assert order["one_contract"] == pytest.approx(fair.edge(1.0, 0.61))
 
 
 def test_an_order_fills_nothing_when_the_price_moved_away_before_it_landed():
