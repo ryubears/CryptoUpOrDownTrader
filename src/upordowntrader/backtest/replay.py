@@ -48,13 +48,13 @@ from upordowntrader.history import download
 from upordowntrader.model import fair, pricing
 from upordowntrader.record.recorder import BOOK_LEVELS
 
-EXCHANGES = ("coinbase", "kraken", "bitstamp", "gemini")         # Those recorded, see record/run.py.
+EXCHANGES = ("coinbase", "kraken", "bitstamp", "gemini", "bullish", "cryptocom")   # Those recorded, see record/run.py.
 PRICE_SOURCES = ("exchanges", *EXCHANGES)  # Exchanges is the mids of all of them averaged.
 FAIR_PRICES = ("model", "recalibrated", "blend")
 THRESHOLD = 0.05        # Edge after the fee, in dollars a contract, an order needs.
 LATENCY = 0.1           # Seconds from the change that opens an edge to the order reaching Kalshi.
 QUOTE_DELAY = 0.05      # Seconds from an exchange's time for a quote to a trader near it having it.
-STAMPED = ("coinbase", "bitstamp", "gemini")    # Exchanges whose stamp on a quote is the quote's time, see quote_feed().
+STAMPED = ("coinbase", "bitstamp", "gemini", "bullish", "cryptocom")  # Exchanges whose stamp on a quote is its time, see quote_feed().
 HISTORY_DAYS = benchmark.HISTORY_DAYS   # Days of Coinbase's minutes read before the first window, for the variance forecast.
 
 
@@ -96,7 +96,10 @@ def quote_feed(conn, source, start, end):
 def price_at(feed, t):
     """
     The price known at each of the times t: the mid of each exchange's newest quote QUOTE_DELAY before, averaged over the
-    exchanges that have one. NaN where none is known.
+    exchanges that have one. NaN where none is known. Equally: on the 78 windows recorded to 2026-10-11 23:30, weighting
+    the mids by each exchange's traded volume, or by the sizes at its best levels, or each one's micro price, priced
+    no better, and the equal average of Coinbase, Bitstamp, and Crypto.com's minute candles tracked 2026's settlements
+    better than one weighted by volume.
     """
     t = np.asarray(t, dtype=float)
     prices = []

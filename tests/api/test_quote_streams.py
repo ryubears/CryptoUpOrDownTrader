@@ -1,11 +1,11 @@
 """
-Tests for the exchanges' quote streams, Coinbase's order book, Kraken's ticker, Bitstamp's order book, and Gemini's top of
-book, fed messages shaped as each sends them.
+Tests for the exchanges' quote streams, Coinbase's order book, Kraken's ticker, Bitstamp's order book, Gemini's top of
+book, Bullish's best level, and Crypto.com's book changes, fed messages shaped as each sends them.
 """
 
 import json
 import pytest
-from upordowntrader.api import bitstamp, coinbase, gemini, kraken
+from upordowntrader.api import bitstamp, bullish, coinbase, cryptocom, gemini, kraken
 from upordowntrader.api.bookstream import Reconnect
 
 
@@ -89,3 +89,45 @@ def test_gemini_rebuilds_the_connection_when_a_message_was_lost():
     stream.handle(json.dumps({"type": "heartbeat", "socket_sequence": 0}))
     with pytest.raises(Reconnect):
         stream.handle(json.dumps({"type": "update", "socket_sequence": 2, "events": []}))
+
+
+def test_bullish_passes_on_each_best_level_with_its_time_and_logs_a_refusal():
+    logs = []
+    seen = []
+    stream = bullish.BullishQuoteStream(["BTCUSD"], lambda *a: seen.append(a), log=logs.append)
+    assert not stream.handle(json.dumps({"jsonrpc": "2.0", "id": "BTCUSD", "result": {
+        "responseCode": "200", "responseCodeName": "OK", "message": "Successfully subscribed ( BTCUSD 1)"}}))
+    assert stream.handle(json.dumps({"type": "update", "dataType": "V1TALevel1", "data": {
+        "symbol": "BTCUSD", "bid": ["83556.4000", "0.00299199"], "ask": ["83556.5000", "0.00233757"], "sequenceNumber": "2529809794",
+        "datetime": "2026-10-11T22:34:38.260Z", "timestamp": "1791758078260", "publishedAtTimestamp": "1791758078263"}}))
+    assert seen == [("BTCUSD", [[83556.4, 0.00299199]], [[83556.5, 0.00233757]], pytest.approx(1791758078.260))]
+    assert not stream.handle(json.dumps({"jsonrpc": "2.0", "id": "BTCUSD", "result": {"responseCode": "400", "message": "Bad symbol"}}))
+    assert logs and logs[0].startswith("bullish stream refused BTCUSD")
+    assert bullish.command_frame("unsubscribe", "BTCUSD")["params"] == {"topic": "l1Orderbook", "symbol": "BTCUSD"}
+
+
+def cryptocom_message(channel, data):
+    return json.dumps({"id": -1, "method": "subscribe", "code": 0, "result": {
+        "instrument_name": "BTC_USD", "subscription": "book.BTC_USD.10", "channel": channel, "depth": 10, "data": [data]}})
+
+
+def test_cryptocom_keeps_the_book_from_its_snapshot_and_changes_and_answers_heartbeats():
+    stream, seen = quote_stream(cryptocom.CryptoComQuoteStream, ["BTC_USD"])
+    assert not stream.handle(json.dumps({"id": 1, "method": "subscribe", "code": 0, "channel": "book.BTC_USD.10"}))
+    stream.handle(cryptocom_message("book", {"asks": [["83578.46", "0.12006", "3"], ["83579.30", "0.12", "1"]],
+                                             "bids": [["83578.45", "0.83356", "9"], ["83578.35", "0.02991", "1"]], "t": 1791758080078, "u": 10}))
+    assert seen[-1] == ("BTC_USD", [[83578.45, 0.83356]], [[83578.46, 0.12006]], pytest.approx(1791758080.078))
+    stream.handle(cryptocom_message("book.update", {"update": {"asks": [["83578.46", "0", "0"]], "bids": [["83578.45", "0.9", "10"]]},
+                                                    "t": 1791758080519, "u": 12, "pu": 10}))
+    assert seen[-1] == ("BTC_USD", [[83578.45, 0.9]], [[83579.30, 0.12]], pytest.approx(1791758080.519))   # The best ask emptied.
+    assert not stream.handle(json.dumps({"id": 1791758845879, "method": "public/heartbeat", "code": 0}))
+    assert stream.commands.get_nowait() == ("heartbeat", [1791758845879])
+
+
+def test_cryptocom_rebuilds_the_connection_when_a_change_was_lost():
+    stream, seen = quote_stream(cryptocom.CryptoComQuoteStream, ["BTC_USD"])
+    assert not stream.handle(cryptocom_message("book.update", {"update": {"asks": [], "bids": []}, "t": 1, "u": 5, "pu": 4}))
+    stream.handle(cryptocom_message("book", {"asks": [["2", "1", "1"]], "bids": [["1", "1", "1"]], "t": 1, "u": 10}))
+    with pytest.raises(Reconnect):
+        stream.handle(cryptocom_message("book.update", {"update": {"asks": [], "bids": []}, "t": 2, "u": 13, "pu": 11}))
+    assert len(seen) == 1                                   # A change before the snapshot is not passed on.
