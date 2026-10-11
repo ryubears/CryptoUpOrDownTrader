@@ -1,20 +1,26 @@
 """
-SQLite storage for bitcoin's price history.
+SQLite storage for bitcoin's price history and the venues' recorded books.
 
 One database file holds every table:
 
     series   each price series, a source's bars of one length for one symbol
     bars     every bar of every series, written by history/download.py
     days     the UTC days each series has wholly stored, so a rerun of the download skips them
+    markets  each window market recorded, its strike and how it settled, written by record/run.py
+    books    a recorded market's book at each best price move, and once a second besides, by record/recorder.py
+    gaps     stretches when a venue's feed was down, by record/recorder.py and record/quotes.py
+    quotes   each exchange's best bid and ask at each price move, and once a second besides, by record/quotes.py
 
 The tables themselves are in schema.sql. This file holds the reads and writes.
 """
 
 import numpy as np
 import sqlite3
+from dataclasses import asdict, fields
 from datetime import date
 from pathlib import Path
 from upordowntrader.common.paths import DATA_DIR
+from upordowntrader.db.models import Market
 
 DB_PATH = DATA_DIR / "history.sqlite"
 SCHEMA = Path(__file__).with_name("schema.sql")
@@ -30,7 +36,7 @@ def connect(db_path=None):
     db_path = Path(db_path or DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=30)
-    # Write ahead logging lets a calibration read while a download writes.
+    # Write ahead logging lets a calibration read while a download or the recorder writes.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA.read_text())
     return conn
@@ -75,3 +81,62 @@ def read_bars(conn, series, start, end):
     rows = conn.execute(f"SELECT {', '.join(BAR_COLUMNS)} FROM bars WHERE series_id = ? AND time >= ? AND time < ? ORDER BY time",
                         (series, start, end)).fetchall()
     return np.array(rows, dtype=float).reshape(-1, len(BAR_COLUMNS))
+
+
+# MARKETS
+
+def upsert_markets(conn, markets):
+    """
+    Insert new markets or refresh known ones. A strike or settlement already stored is kept when a read lacks it.
+    """
+    names = [f.name for f in fields(Market)]
+    kept = ("strike", "settlement", "result", "settled_at")
+    with conn:
+        conn.executemany(f"""
+            INSERT INTO markets ({', '.join(names)}) VALUES ({', '.join(':' + n for n in names)})
+            ON CONFLICT (venue, ticker) DO UPDATE SET open_time = excluded.open_time, close_time = excluded.close_time,
+                {', '.join(f'{n} = COALESCE(excluded.{n}, markets.{n})' for n in kept)}
+        """, [asdict(m) for m in markets])
+
+
+def unsettled(conn, venue, now):
+    """
+    The tickers of a venue's markets closed by now, in seconds since 1970, that have not settled yet.
+    """
+    return [row[0] for row in conn.execute("SELECT ticker FROM markets WHERE venue = ? AND close_time <= ? AND result IS NULL", (venue, now))]
+
+
+def load_markets(conn, venue):
+    """
+    A venue's markets, oldest first.
+    """
+    names = [f.name for f in fields(Market)]
+    return [Market(*row) for row in conn.execute(f"SELECT {', '.join(names)} FROM markets WHERE venue = ? ORDER BY close_time", (venue,))]
+
+
+# BOOKS
+
+def store_books(conn, rows):
+    """
+    Store book changes, each a (venue, ticker, received, sent, bid, bid_size, ask, ask_size, bids, asks) tuple, in one
+    transaction.
+    """
+    with conn:
+        conn.executemany("INSERT INTO books (venue, ticker, received, sent, bid, bid_size, ask, ask_size, bids, asks) "
+                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+
+
+def store_quotes(conn, rows):
+    """
+    Store quotes, each a (source, received, sent, bid, bid_size, ask, ask_size) tuple, in one transaction.
+    """
+    with conn:
+        conn.executemany("INSERT INTO quotes (source, received, sent, bid, bid_size, ask, ask_size) VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+
+
+def insert_gap(conn, gap):
+    """
+    Record a stretch when a venue's feed was down.
+    """
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO gaps (venue, start_time, end_time) VALUES (:venue, :start_time, :end_time)", asdict(gap))
