@@ -1,6 +1,6 @@
 """
 Record Kalshi's Bitcoin 15 minute windows: their order books as they change, and how each one settled, and beside them
-the best bid and ask of Coinbase and Kraken, two of the exchanges BRTI is built from, every second.
+the best bid and ask of Coinbase, Kraken, Bitstamp, and Gemini, four of the exchanges BRTI is built from, as they move.
 
 A window's market is listed a day ahead and trades only during its 15
 minutes. Just after each quarter hour, and every REFRESH_SECONDS besides,
@@ -36,7 +36,7 @@ import argparse
 import asyncio
 import signal
 import time
-from upordowntrader.api import coinbase, kalshi, kraken
+from upordowntrader.api import bitstamp, coinbase, gemini, kalshi, kraken
 from upordowntrader.common.log import log, on_failure
 from upordowntrader.common.periodic import Periodic
 from upordowntrader.db import database
@@ -51,9 +51,10 @@ LOOKAHEAD_SECONDS = 1800    # How far ahead the windows read reach: past the one
 SETTLE_SECONDS = 30         # Kalshi settles a window a few seconds after it closes.
 STATUS_SECONDS = 60
 SLEEP_SECONDS = 10          # A tick this long after the last means the machine slept, or the process stalled.
-# Each exchange whose best bid and ask are recorded, with its quote stream and its name for bitcoin in dollars. Both are
-# among the exchanges BRTI is built from.
-QUOTE_STREAMS = {"coinbase": (coinbase.CoinbaseQuoteStream, "BTC-USD"), "kraken": (kraken.KrakenQuoteStream, "BTC/USD")}
+# Each exchange whose best bid and ask are recorded, with its quote stream and its name for bitcoin in dollars. All are
+# among the exchanges BRTI is built from. LMAX Digital and Bullish, the others, have no public feed to read without an account.
+QUOTE_STREAMS = {"coinbase": (coinbase.CoinbaseQuoteStream, "BTC-USD"), "kraken": (kraken.KrakenQuoteStream, "BTC/USD"),
+                 "bitstamp": (bitstamp.BitstampQuoteStream, "btcusd"), "gemini": (gemini.GeminiQuoteStream, "BTCUSD")}
 
 
 async def refresh(conn, stream, recorder, reads):

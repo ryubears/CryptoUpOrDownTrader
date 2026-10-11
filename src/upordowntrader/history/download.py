@@ -1,21 +1,19 @@
 """
 Download bitcoin's price history into the database, one UTC day at a time, skipping the days already stored.
 
-Binance's 1 second klines come from its archive, one file per day, published the day after. Coinbase's 1 minute candles
-come from its REST API, 300 to a call. Either way each day is stored in one transaction, so an interrupted download
-leaves only whole days, and running it again picks up where it stopped. A few days are fetched at once, since most of
-the time goes to waiting on the network.
+Coinbase's 1 minute candles come from its REST API, 300 to a call. Each day is stored in one transaction, so an
+interrupted download leaves only whole days, and running it again picks up where it stopped. A few days are fetched at
+once, since most of the time goes to waiting on the network.
 
 Run from src/ with:
-    python3 -m upordowntrader.history.download --source binance --start 2025-09-01
-    python3 -m upordowntrader.history.download --source coinbase --start 2025-09-01
+    python3 -m upordowntrader.history.download --start 2025-09-01
 """
 
 import argparse
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
-from upordowntrader.api import binance, coinbase
+from upordowntrader.api import coinbase
 from upordowntrader.api.http import RequestFailed
 from upordowntrader.common.log import log
 from upordowntrader.common.sources import SOURCES
@@ -23,15 +21,6 @@ from upordowntrader.db import database
 
 WORKERS = 4             # Days fetched at once.
 DEFAULT_DAYS = 400      # Days back from today the download starts by default: a year to score, and four weeks of warmup.
-
-
-def binance_day(day):
-    """
-    One day of Binance's 1 second BTCUSDT klines, from the archive, as bar tuples for database.store_day().
-    """
-    symbol, _ = SOURCES["binance"]
-    return [(int(k.open_time.timestamp()), k.open, k.high, k.low, k.close, k.volume, k.trade_count)
-            for k in binance.daily_archive(symbol, "1s", day)]
 
 
 def coinbase_day(day):
@@ -44,7 +33,7 @@ def coinbase_day(day):
             for c in coinbase.candles(symbol, seconds, start, start + timedelta(days=1))]
 
 
-FETCHERS = {"binance": binance_day, "coinbase": coinbase_day}
+FETCHERS = {"coinbase": coinbase_day}
 
 
 def fetch_day(source, day):
@@ -94,7 +83,7 @@ def download(conn, source, first, end, log=print, workers=WORKERS):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Download bitcoin's price history into SQLite.")
-    ap.add_argument("--source", default="binance", choices=["all", *SOURCES])
+    ap.add_argument("--source", default="coinbase", choices=["all", *SOURCES])
     ap.add_argument("--start", type=date.fromisoformat, default=datetime.now(UTC).date() - timedelta(days=DEFAULT_DAYS),
                     help="first UTC day, YYYY-MM-DD")
     ap.add_argument("--end", type=date.fromisoformat, default=datetime.now(UTC).date(), help="UTC day to stop before, YYYY-MM-DD")

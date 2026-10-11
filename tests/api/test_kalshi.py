@@ -37,6 +37,7 @@ def test_a_market_carries_its_times_strike_and_settlement():
     assert upcoming.strike is None                              # Set as it opens.
     assert (settled.strike, settled.settlement, settled.result) == (82958.65, 82961.78, "yes")
     assert settled.settled_at == pytest.approx(1791658803.686718)
+    assert kalshi.market({**SETTLED, "expiration_value": "77,362.10"}).settlement == 77362.10      # As a few markets write it.
 
 
 def test_windows_asks_for_the_series_closing_in_the_range_and_follows_the_cursor(serve):
@@ -54,6 +55,23 @@ def test_markets_reads_tickers_in_batches(serve, monkeypatch):
     sent = serve(lambda request: httpx.Response(200, json={"markets": [SETTLED]}))
     kalshi.markets(["c", "a", "b", "a"])
     assert [request.url.params["tickers"] for request in sent] == ["a,b", "c"]
+
+
+def test_historical_windows_reads_the_whole_historical_store(serve):
+    sent = serve(lambda request: httpx.Response(200, json={"markets": [SETTLED], "cursor": ""}))
+    assert [m.ticker for m in kalshi.historical_windows("KXBTC15M")] == [SETTLED["ticker"]]
+    assert sent[0].url.path.endswith("/historical/markets") and "min_close_ts" not in sent[0].url.params
+
+
+def test_minute_quotes_reads_each_minutes_closing_bid_and_ask_with_empty_sides_as_none(serve):
+    candle = {"end_period_ts": 1786491060, "volume_fp": "90924.95", "price": {"close_dollars": "0.5000"},
+              "yes_bid": {"close_dollars": "0.5000"}, "yes_ask": {"close_dollars": "0.5100"}}
+    empty = {"end_period_ts": 1786491120, "volume": "0", "price": {"close": None}, "yes_bid": {"close": "0.0000"}, "yes_ask": {"close": "1.0000"}}
+    sent = serve(lambda request: httpx.Response(200, json={"markets": [{"market_ticker": "A", "candlesticks": [candle, empty]}]}))
+    found = kalshi.minute_quotes(["A", "B"], 1786491000.0, 1786491900)
+    assert found == {"A": [(1786491060, 0.5, 0.51, 0.5, 90924.95), (1786491120, None, None, None, 0.0)]}
+    params = sent[0].url.params
+    assert (params["market_tickers"], params["start_ts"], params["end_ts"], params["period_interval"]) == ("A,B", "1786491000", "1786491900", "1")
 
 
 def stream(tickers=("T",), depth=5):

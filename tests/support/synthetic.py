@@ -36,4 +36,4 @@ def random_walk_history(days, sigma, seed=0, first_day=FIRST_DAY):
     for d, rows in enumerate(random_walk_rows(days, sigma, seed, first_day=first_day)):
         parts.append(load.from_seconds(rows, day_start(first_day, d), before))
         before = parts[-1][1]["close"][-1]
-    return load.assemble("binance", first_day, parts)
+    return load.assemble("synthetic", first_day, parts)

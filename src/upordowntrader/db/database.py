@@ -6,7 +6,8 @@ One database file holds every table:
     series   each price series, a source's bars of one length for one symbol
     bars     every bar of every series, written by history/download.py
     days     the UTC days each series has wholly stored, so a rerun of the download skips them
-    markets  each window market recorded, its strike and how it settled, written by record/run.py
+    markets  each window market recorded, its strike and how it settled, written by record/run.py and history/markets.py
+    minutes  a market's best Yes bid and ask minute by minute, from the venue's candlesticks, by history/markets.py
     books    a recorded market's book at each best price move, and once a second besides, by record/recorder.py
     gaps     stretches when a venue's feed was down, by record/recorder.py and record/quotes.py
     quotes   each exchange's best bid and ask at each price move, and once a second besides, by record/quotes.py
@@ -112,6 +113,37 @@ def load_markets(conn, venue):
     """
     names = [f.name for f in fields(Market)]
     return [Market(*row) for row in conn.execute(f"SELECT {', '.join(names)} FROM markets WHERE venue = ? ORDER BY close_time", (venue,))]
+
+
+# MINUTES
+
+def store_minutes(conn, venue, minutes):
+    """
+    Store markets' minutes, as {ticker: [(time, bid, ask, price, volume)]}, in one transaction. Minutes stored already are
+    replaced.
+    """
+    with conn:
+        conn.executemany("INSERT OR REPLACE INTO minutes (venue, ticker, time, bid, ask, price, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                         [(venue, ticker, *row) for ticker, rows in minutes.items() for row in rows])
+
+
+def tickers_with_minutes(conn, venue):
+    """
+    The tickers of a venue's markets with minutes stored.
+    """
+    return {row[0] for row in conn.execute("SELECT DISTINCT ticker FROM minutes WHERE venue = ?", (venue,))}
+
+
+def read_minutes(conn, venue):
+    """
+    Every stored minute of a venue's markets, as {ticker: numpy array of (time, bid, ask) rows, oldest first}, NaN for an
+    empty side.
+    """
+    found = {}
+    for ticker, time, bid, ask in conn.execute("SELECT ticker, time, bid, ask FROM minutes WHERE venue = ? ORDER BY ticker, time", (venue,)):
+        found.setdefault(ticker, []).append((time, bid, ask))
+    return {ticker: np.array(rows, dtype=float) for ticker, rows in found.items()}
+
 
 
 # BOOKS

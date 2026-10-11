@@ -53,21 +53,27 @@ def test_no_order_goes_when_it_would_land_after_the_close():
     assert replay.take_edges(np.array([899.95]), np.array([0.70]), b, close_time=900, up=True) == []
 
 
-def test_with_binance_the_model_reads_the_second_before_on_brtis_level():
+def flat_feed(price, jumps=()):
+    """
+    A Feed of one exchange quoting price from START, and each (time, price) of jumps after.
+    """
+    times = np.array([START, *(t for t, _ in jumps)], dtype=float)
+    return replay.Feed((times,), (np.array([price, *(p for _, p in jumps)]),))
+
+
+def test_the_model_reads_the_exchanges_on_brtis_level_and_a_jump_once_it_is_known():
     market = Market("kalshi", "T", "E", "KXBTC15M", OPEN, OPEN + 900, 80_000.0, None, "yes", None)
-    seconds = np.full(2 * 3600, 80_050.0)                   # The stand-in runs 50 above BRTI's strike.
     variance = np.full(2 * 60, 1e-9)
-    t = np.arange(OPEN + 1, OPEN + 900)
-    chances = replay.window_chances(replay.Feed(START, seconds=seconds), variance, START, market, t)
-    assert np.allclose(chances[:-60], 0.5, atol=0.01)       # At the strike, after the offset.
-    seconds[OPEN + 100 - START] = 80_150.0                  # A jump in second 100 of the window ...
-    later = replay.window_chances(replay.Feed(START, seconds=seconds), variance, START, market, t)
-    assert later[99] == chances[99] and later[100] > 0.9    # ... is known only once that second is over.
+    t = np.array([OPEN + 100.0, OPEN + 100.04, OPEN + 100.06])
+    chances = replay.window_chances(flat_feed(80_050.0), variance, START, market, t)    # The stand-in runs 50 above BRTI.
+    assert np.allclose(chances, 0.5, atol=0.01)                                         # At the strike, after the offset.
+    later = replay.window_chances(flat_feed(80_050.0, [(OPEN + 100.0, 80_150.0)]), variance, START, market, t)
+    assert later[:2].tolist() == chances[:2].tolist() and later[2] > 0.9                 # Known QUOTE_DELAY after it was sent.
 
 
 def test_with_the_exchanges_the_model_reads_the_newest_quote_a_moment_after_it_was_sent():
     times, mids = np.array([START + 10.0, START + 20.0]), np.array([100.0, 110.0])
-    feed = replay.Feed(START, times=(times,), mids=(mids,))
+    feed = replay.Feed((times,), (mids,))
     prices = replay.price_at(feed, [START + 5.0, START + 20.02, START + 20.06, START + 30.0])
     assert np.isnan(prices[0]) and prices[1:].tolist() == [100.0, 110.0, 110.0]   # The second quote is known QUOTE_DELAY after.
 
@@ -94,7 +100,7 @@ def test_a_kraken_quote_with_a_stale_stamp_is_timed_by_its_arrival(tmp_path):
 
 def test_a_moment_inside_the_averaging_minutes_first_second_counts_no_reading_taken():
     market = Market("kalshi", "T", "E", "KXBTC15M", OPEN, OPEN + 900, 80_000.0, None, "yes", None)
-    feed = replay.Feed(START, seconds=np.full(2 * 3600, 80_010.0))
+    feed = flat_feed(80_010.0)
     variance = np.full(2 * 60, 1e-9)
     close = market.close_time
     before, inside, first = replay.window_chances(feed, variance, START, market, np.array([close - 60.0, close - 59.6, close - 59.0]))

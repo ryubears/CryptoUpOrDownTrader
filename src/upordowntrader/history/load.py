@@ -122,10 +122,11 @@ def assemble(source, first_day, days):
                    minute_average=minutes["average"], minute_realized=minutes.get("realized"), minute_missing=minutes["missing"])
 
 
-def load(conn, source, first_day=None, end_day=None, log=print):
+def load(conn, source, first_day=None, end_day=None, log=print, fetch=None):
     """
     A source's History from first_day up to but not including end_day, by default from the first day stored to the
-    last. Days not stored inside the range count as missing.
+    last. A day not stored is read with fetch(day), when given, which returns its bars as download.fetch_day() does, or
+    None, for today, which is never stored whole. Days without bars count as missing.
     """
     symbol, seconds = SOURCES[source]
     series = database.series_id(conn, source, symbol, seconds)
@@ -139,7 +140,12 @@ def load(conn, source, first_day=None, end_day=None, log=print):
     for i in range((end_day - first_day).days):
         day = first_day + timedelta(days=i)
         day_start = int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp())
-        days.append(convert(database.read_bars(conn, series, day_start, day_start + DAY), day_start, before))
+        bars = fetch(day) if fetch is not None and day not in stored else None
+        if bars is None:
+            rows = database.read_bars(conn, series, day_start, day_start + DAY)
+        else:
+            rows = np.array([bar[:len(database.BAR_COLUMNS)] for bar in bars], dtype=float).reshape(-1, len(database.BAR_COLUMNS))
+        days.append(convert(rows, day_start, before))
         before = days[-1][1]["close"][-1]
         if (i + 1) % 30 == 0:
             log(f"loaded {i + 1} of {(end_day - first_day).days} days of {source}")

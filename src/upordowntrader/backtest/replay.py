@@ -3,12 +3,12 @@ Replay the recorded Kalshi books against the model: how its fair price compared 
 every edge would have made.
 
 Every window recorded from its open and settled is replayed. The model prices Up at every book change and every second
-from what was known then: Kalshi's exact strike, bitcoin's price from a stand-in for BRTI, see PRICE_SOURCES, moved onto
-BRTI's level by the gap between the two over the minute before the window opened, and a variance forecast from Binance's
-minutes before, with the settings the calibration chose, see MODEL. Binance's price of a second is only known once the
-second is over, so with Binance the model reads the last whole one, up to a second late, which on 2026-10-11 cost it:
-Kalshi's book moved within tens of milliseconds of bitcoin, and the model took those moves for edges. An exchange's quote
-is known QUOTE_DELAY after the exchange's time for it, so with the exchanges the model is as current as a trader near them.
+from what was known then: Kalshi's exact strike, bitcoin's price from the exchanges BRTI is built from, see PRICE_SOURCES,
+moved onto BRTI's level by the gap between the two over the minute before the window opened, and a variance forecast from
+Coinbase's minutes before, with the settings the calibration chose, see MODEL. An exchange's quote is known QUOTE_DELAY
+after the exchange's time for it, so the model is as current as a trader near the exchanges. That matters: on 2026-10-11
+Kalshi's book moved within tens of milliseconds of bitcoin, and a model reading bitcoin a second late took the market's
+moves for edges.
 
 The trading rule, to revisit before trading live: take an edge each time it reaches the threshold after Kalshi's taker
 fee, on either side, buying Yes below the model's price or No above it, but once per episode: a side's edge must fall
@@ -24,13 +24,13 @@ price is right, and the realized, from how the windows settled, which over few w
 BOOK_LEVELS levels a side, so an order whose every level kept was worth taking may have been offered more.
 
 Times are the venues' own, not this machine's, whose clock may be off: each book change at its matching engine time,
-each Coinbase quote at Coinbase's time, and Binance's seconds at Binance's. A book snapshot carries no time, so it takes
-its arrival shifted by the median gap between arrival and matching engine time, and so does every Kraken quote, as
-Kraken's stamps are not always the quote's time, see quote_feed().
+and each quote at its exchange's time, see quote_feed(). A book snapshot carries no time, so it takes its arrival shifted
+by the median gap between arrival and matching engine time, and so does every Kraken quote, as Kraken's stamps are not
+always the quote's time.
 
 Run from src/ with:
     python3 -m upordowntrader.backtest.replay
-    python3 -m upordowntrader.backtest.replay --price exchanges --threshold 0.05 --latency 0.1
+    python3 -m upordowntrader.backtest.replay --price coinbase --threshold 0.05 --latency 0.1
 """
 
 import argparse
@@ -38,73 +38,55 @@ import json
 import numpy as np
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from upordowntrader.api import binance
 from upordowntrader.backtest import metrics
 from upordowntrader.common.log import log
-from upordowntrader.common.sources import SOURCES
 from upordowntrader.db import database
-from upordowntrader.history import load
+from upordowntrader.history import download, load
 from upordowntrader.model import pricing, volatility
 from upordowntrader.record.recorder import BOOK_LEVELS
 
-PRICE_SOURCES = ("binance", "coinbase", "kraken", "exchanges")   # Exchanges is Coinbase's and Kraken's mids averaged.
+EXCHANGES = ("coinbase", "kraken", "bitstamp", "gemini")         # Those recorded, see record/run.py.
+PRICE_SOURCES = ("exchanges", *EXCHANGES)  # Exchanges is the mids of all of them averaged.
 MODEL = ("close", 30, "scaled", False)  # The calibration's best variance forecast: input, half life, weighting, season.
 DOF = 8                 # The Student t's degrees of freedom, as the calibration's best distribution.
 THRESHOLD = 0.05        # Edge after the fee, in dollars a contract, an order needs.
 LATENCY = 0.1           # Seconds from the change that opens an edge to the order reaching Kalshi.
 QUOTE_DELAY = 0.05      # Seconds from an exchange's time for a quote to a trader near it having it.
-STAMPED = ("coinbase",) # Exchanges whose stamp on a quote is the quote's time, see quote_feed().
+STAMPED = ("coinbase", "bitstamp", "gemini")    # Exchanges whose stamp on a quote is the quote's time, see quote_feed().
 FEE_RATE = 0.07         # Kalshi's taker fee is FEE_RATE * price * (1 - price) a contract, for KXBTC15M's multiplier of 1.
-HISTORY_DAYS = 2        # Days of Binance's minutes read before the first window, for the variance forecast.
-DAY = 86400
+HISTORY_DAYS = 2        # Days of Coinbase's minutes read before the first window, for the variance forecast.
 
 
 # PRICES
 
-def binance_history(conn, first_day, end_day, log=print):
+def price_history(conn, first_day, end_day, log=print):
     """
-    Binance's History from first_day up to end_day, from the stored archive, and from the REST API for days not stored
-    yet, as the archive publishes a day only the day after.
+    Coinbase's minutes from first_day up to end_day, for the variance forecast: days not stored yet are downloaded and
+    stored, and today's, still under way, read from Coinbase without storing.
     """
-    symbol, seconds = SOURCES["binance"]
-    stored = database.stored_days(conn, database.series_id(conn, "binance", symbol, seconds))
-    series = database.series_id(conn, "binance", symbol, seconds)
-    days, before = [], np.nan
-    for i in range((end_day - first_day).days):
-        day = first_day + timedelta(days=i)
-        day_start = int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp())
-        if day in stored:
-            rows = database.read_bars(conn, series, day_start, day_start + DAY)
-        else:
-            log(f"reading {day} from Binance's REST API, not stored yet")
-            end = min(datetime.fromtimestamp(day_start + DAY, UTC), datetime.now(UTC))
-            found = list(binance.klines(symbol, "1s", datetime.fromtimestamp(day_start, UTC), end))
-            rows = np.array([[k.open_time.timestamp(), k.open, k.high, k.low, k.close, k.volume] for k in found]).reshape(-1, 6)
-        days.append(load.from_seconds(rows, day_start, before))
-        before = days[-1][1]["close"][-1]
-    return load.assemble("binance", first_day, days)
+    download.download(conn, "coinbase", first_day, end_day, log)
+    today = datetime.now(UTC).date()
+    return load.load(conn, "coinbase", first_day, end_day, log, fetch=lambda day: download.fetch_day("coinbase", day) if day >= today else None)
 
 
 @dataclass
 class Feed:
     """
-    Bitcoin's price from one source, for price_at(): every second's close from start for Binance, or each exchange's
-    quotes, as times by the exchange's clock and mids.
+    Bitcoin's price from the exchanges' quotes, for price_at(): each exchange's quote times, by the exchange's clock, and
+    mids.
     """
-    start: int
-    seconds: np.ndarray | None = None   # Binance's close of each second from start.
-    times: tuple = ()                   # Each exchange's quote times, oldest first.
-    mids: tuple = ()                    # And the mid of each quote.
+    times: tuple                        # Each exchange's quote times, oldest first.
+    mids: tuple                         # And the mid of each quote.
 
 
 def quote_feed(conn, source, start, end):
     """
-    The Feed of an exchange's quotes, or of both Coinbase's and Kraken's for 'exchanges', reaching from a minute before
+    The Feed of an exchange's quotes, or of all EXCHANGES' for 'exchanges', reaching from a minute before
     start to a minute after end, in seconds since 1970. A quote of a STAMPED exchange is timed by its stamp, and any
     other by its arrival shifted by the median gap between the exchange's stamps and arrival: Kraken's ticker stamps
     some quotes with the time of an earlier change, on 2026-10-11 a fifth of them, 1 in 20 over a second stale.
     """
-    sources = ("coinbase", "kraken") if source == "exchanges" else (source,)
+    sources = EXCHANGES if source == "exchanges" else (source,)
     times, mids = [], []
     for name in sources:
         rows = np.array(conn.execute("SELECT received, sent, (bid + ask) / 2 FROM quotes WHERE source = ? AND received >= ? AND received < ? "
@@ -117,19 +99,15 @@ def quote_feed(conn, source, start, end):
         order = np.argsort(when, kind="stable")
         times.append(when[order])
         mids.append(rows[order, 2])
-    return Feed(start, times=tuple(times), mids=tuple(mids))
+    return Feed(tuple(times), tuple(mids))
 
 
 def price_at(feed, t):
     """
-    The source's price known at each of the times t: Binance's close of the last whole second, or the mid of each
-    exchange's newest quote QUOTE_DELAY before, averaged over the exchanges that have one. NaN where none is known.
+    The price known at each of the times t: the mid of each exchange's newest quote QUOTE_DELAY before, averaged over the
+    exchanges that have one. NaN where none is known.
     """
     t = np.asarray(t, dtype=float)
-    if feed.seconds is not None:
-        index = np.floor(t).astype(int) - 1 - feed.start
-        inside = (index >= 0) & (index < len(feed.seconds))
-        return np.where(inside, feed.seconds[np.clip(index, 0, len(feed.seconds) - 1)], np.nan)
     prices = []
     for times, mids in zip(feed.times, feed.mids, strict=True):
         i = np.searchsorted(times, t - QUOTE_DELAY, side="right") - 1
@@ -279,13 +257,10 @@ def replay(conn, price_source, thresholds, latencies, log=print):
         raise SystemExit("no settled window recorded from its open yet, run the recorder for a while")
     first_day = datetime.fromtimestamp(windows[0].open_time, UTC).date() - timedelta(days=HISTORY_DAYS)
     end_day = datetime.fromtimestamp(windows[-1].close_time, UTC).date() + timedelta(days=1)
-    history = binance_history(conn, first_day, end_day, log)
+    history = price_history(conn, first_day, end_day, log)
     start = int(datetime(first_day.year, first_day.month, first_day.day, tzinfo=UTC).timestamp())
     variance, _ = volatility.forecasts(history, *MODEL)
-    if price_source == "binance":
-        feed = Feed(start, seconds=history.second_close)
-    else:
-        feed = quote_feed(conn, price_source, windows[0].open_time, windows[-1].close_time)
+    feed = quote_feed(conn, price_source, windows[0].open_time, windows[-1].close_time)
     columns = {name: [] for name in ("window", "left", "chance", "bid", "ask", "up")}
     trades = {(threshold, latency): [] for threshold in thresholds for latency in latencies}
     for w, market in enumerate(windows):
@@ -365,7 +340,7 @@ def report(windows, per_second, trades, price_source):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Replay the recorded Kalshi books against the model and the trading rule.")
-    ap.add_argument("--price", default="binance", choices=PRICE_SOURCES, help="bitcoin's price the model reads")
+    ap.add_argument("--price", default="exchanges", choices=PRICE_SOURCES, help="bitcoin's price the model reads")
     ap.add_argument("--threshold", type=float, default=THRESHOLD, help="edge after the fee an order needs, in dollars a contract")
     ap.add_argument("--latency", type=float, default=LATENCY, help="seconds from an edge opening to the order reaching Kalshi")
     args = ap.parse_args()

@@ -1,10 +1,12 @@
 """
-Tests for the exchanges' quote streams, Coinbase's order book and Kraken's ticker, fed messages shaped as each sends them.
+Tests for the exchanges' quote streams, Coinbase's order book, Kraken's ticker, Bitstamp's order book, and Gemini's top of
+book, fed messages shaped as each sends them.
 """
 
 import json
 import pytest
-from upordowntrader.api import coinbase, kraken
+from upordowntrader.api import bitstamp, coinbase, gemini, kraken
+from upordowntrader.api.bookstream import Reconnect
 
 
 def quote_stream(stream_class, products):
@@ -51,3 +53,39 @@ def test_kraken_logs_a_refused_subscription():
     stream = kraken.KrakenQuoteStream(["BTC/USD"], lambda *a: None, log=logs.append)
     stream.handle(json.dumps({"method": "subscribe", "success": False, "error": "Currency pair not supported"}))
     assert logs == ["kraken stream refused subscribe: Currency pair not supported"]
+
+
+def test_bitstamp_passes_on_the_best_level_of_each_book_it_sends():
+    stream, seen = quote_stream(bitstamp.BitstampQuoteStream, ["btcusd"])
+    assert not stream.handle(json.dumps({"event": "bts:subscription_succeeded", "channel": "order_book_btcusd", "data": {}}))
+    assert stream.handle(json.dumps({"event": "data", "channel": "order_book_btcusd", "data": {
+        "timestamp": "1791734796", "microtimestamp": "1791734796206682",
+        "bids": [["83705.24", "0.35410802"], ["83704.85", "0.25000000"]], "asks": [["83705.25", "0.41366012"], ["83708.72", "0.1"]]}}))
+    assert seen == [("btcusd", [[83705.24, 0.35410802]], [[83705.25, 0.41366012]], pytest.approx(1791734796.206682))]
+    assert not stream.handle(json.dumps({"event": "data", "channel": "order_book_ethusd", "data": {"bids": [], "asks": []}}))
+
+
+def test_bitstamp_asking_to_reconnect_rebuilds_the_connection():
+    stream, _ = quote_stream(bitstamp.BitstampQuoteStream, ["btcusd"])
+    with pytest.raises(Reconnect):
+        stream.handle(json.dumps({"event": "bts:request_reconnect", "channel": "", "data": ""}))
+
+
+def test_gemini_keeps_both_sides_and_passes_on_each_change_with_its_time():
+    stream, seen = quote_stream(gemini.GeminiQuoteStream, ["BTCUSD"])
+    stream.handle(json.dumps({"type": "update", "socket_sequence": 0, "events": [
+        {"type": "change", "side": "ask", "price": "83725.59", "remaining": "0.0028", "reason": "initial"},
+        {"type": "change", "side": "bid", "price": "83725.58", "remaining": "0.03583296", "reason": "initial"}]}))
+    assert seen[-1] == ("BTCUSD", [[83725.58, 0.03583296]], [[83725.59, 0.0028]], None)     # The first says no time.
+    stream.handle(json.dumps({"type": "update", "socket_sequence": 1, "timestampms": 1791734795679, "events": [
+        {"type": "change", "side": "ask", "price": "83725.60", "remaining": "0.5", "reason": "top-of-book"}]}))
+    assert seen[-1] == ("BTCUSD", [[83725.58, 0.03583296]], [[83725.60, 0.5]], pytest.approx(1791734795.679))
+    assert not stream.handle(json.dumps({"type": "heartbeat", "socket_sequence": 2}))
+    assert len(seen) == 2
+
+
+def test_gemini_rebuilds_the_connection_when_a_message_was_lost():
+    stream, _ = quote_stream(gemini.GeminiQuoteStream, ["BTCUSD"])
+    stream.handle(json.dumps({"type": "heartbeat", "socket_sequence": 0}))
+    with pytest.raises(Reconnect):
+        stream.handle(json.dumps({"type": "update", "socket_sequence": 2, "events": []}))

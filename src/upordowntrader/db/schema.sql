@@ -3,13 +3,13 @@
 -- A price series: one source's bars of one length for one symbol.
 CREATE TABLE IF NOT EXISTS series (
     id       INTEGER PRIMARY KEY,
-    source   TEXT NOT NULL,      -- 'binance' or 'coinbase'.
-    symbol   TEXT NOT NULL,      -- The source's own name for the pair, 'BTCUSDT' or 'BTC-USD'.
-    seconds  INTEGER NOT NULL,   -- Bar length: 1 for Binance's 1 second klines, 60 for Coinbase's 1 minute candles.
+    source   TEXT NOT NULL,      -- 'coinbase'.
+    symbol   TEXT NOT NULL,      -- The source's own name for the pair, 'BTC-USD'.
+    seconds  INTEGER NOT NULL,   -- Bar length: 60 for Coinbase's 1 minute candles, 1 for a source with 1 second bars.
     UNIQUE (source, symbol, seconds)
 );
 
--- One row per bar. Prices are in the quote currency, USDT or USD, and volume in bitcoin.
+-- One row per bar. Prices are in the quote currency, USD, and volume in bitcoin.
 CREATE TABLE IF NOT EXISTS bars (
     series_id  INTEGER NOT NULL,
     time       INTEGER NOT NULL,   -- When the bar opens, in seconds since 1970, UTC.
@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS gaps (
 -- Each exchange's best bid and ask, for a stand-in for BRTI, each time its best bid or ask price moved, and once a second
 -- while only a size changed, as record/quotes.py stores them.
 CREATE TABLE IF NOT EXISTS quotes (
-    source    TEXT NOT NULL,        -- 'coinbase' or 'kraken'.
+    source    TEXT NOT NULL,        -- 'coinbase', 'kraken', 'bitstamp', or 'gemini'.
     received  REAL NOT NULL,        -- When the quote reached us, in seconds since 1970 by our clock.
     sent      REAL,                 -- When the exchange says it was, where it does.
     bid       REAL,                 -- The best bid, null when there is none.
@@ -83,3 +83,15 @@ CREATE TABLE IF NOT EXISTS quotes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_quotes_source ON quotes (source, received);
+
+-- A window market's best Yes bid and ask minute by minute, from the venue's candlesticks, see history/markets.py.
+CREATE TABLE IF NOT EXISTS minutes (
+    venue   TEXT NOT NULL,
+    ticker  TEXT NOT NULL,
+    time    INTEGER NOT NULL,   -- When the minute ended, in seconds since 1970.
+    bid     REAL,               -- The best Yes bid as the minute ended, null when there was none.
+    ask     REAL,               -- The best Yes ask, null when there was none.
+    price   REAL,               -- The last trade's price by then, null before any.
+    volume  REAL,               -- Contracts traded in the minute.
+    PRIMARY KEY (venue, ticker, time)
+) WITHOUT ROWID;

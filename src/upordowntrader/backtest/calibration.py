@@ -17,13 +17,13 @@ luck shows up worse on the test. Scores, see backtest/metrics.py:
     spread     the standard deviation of the residuals, see pricing.residuals(): 1 when the variance forecast is right on
                average, above 1 when bitcoin moved more than forecast
 
-The settlement averages come from the source's own prices, not BRTI, which is published only under license. Binance's
-are the average of the minute's 60 one second closes, as BRTI's settlement averages 60 one second readings. Coinbase's
-1 minute candles have no seconds, so its averages are (open + high + low + close) / 4, and the late evaluations inside
-the averaging minute are left out.
+The settlement averages come from the source's own prices, not BRTI, which is published only under license. A source
+with 1 second bars averages the minute's 60 closes, as BRTI's settlement averages 60 one second readings. Coinbase's 1
+minute candles have no seconds, so its averages are (open + high + low + close) / 4, and the late evaluations inside the
+averaging minute are left out.
 
 Run from src/ with:
-    python3 -m upordowntrader.backtest.calibration --source binance --minutes 15
+    python3 -m upordowntrader.backtest.calibration --minutes 15
 
 The scores of every combination are saved as a CSV under data/calibration/.
 """
@@ -356,7 +356,7 @@ def save(results, path):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Score the fair price model's chances against how bitcoin's windows settled.")
-    ap.add_argument("--source", default="binance", choices=sorted(SOURCES))
+    ap.add_argument("--source", default="coinbase", choices=sorted(SOURCES))
     ap.add_argument("--minutes", type=int, default=15, help="window length, 15 for Kalshi's and Polymarket US's 15 minute markets")
     ap.add_argument("--start", type=date.fromisoformat, help="first UTC day of history to read, YYYY-MM-DD, by default the first stored")
     ap.add_argument("--end", type=date.fromisoformat, help="UTC day to stop before, by default the day after the last stored")
