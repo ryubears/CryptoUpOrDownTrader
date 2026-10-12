@@ -139,10 +139,12 @@ async def settle_hyperliquid(conn, log):
     """
     Settle Hyperliquid's windows closed by now: the 15 minute series' as its deployer did, read from the explorer with
     every other window it settled lately, so those never seen listed are stored too, and the daily series' by the mark
-    interpolated to the close, see interpolated_mark(). A window closed over SETTLE_REACH ago is left as it is.
+    interpolated to the close, see interpolated_mark(). A window closed over SETTLE_REACH ago is left as it is, and so is
+    one on a perp no longer among hyperliquid.UNDERLYINGS, whose marks are no longer recorded.
     """
     now = time.time()
-    closed = [m for m in database.load_markets(conn, "hyperliquid") if m.result is None and now - SETTLE_REACH < m.close_time <= now]
+    closed = [m for m in database.load_markets(conn, "hyperliquid") if m.result is None and now - SETTLE_REACH < m.close_time <= now
+              and m.series.split("-")[1] in hyperliquid.UNDERLYINGS]
     official = {}
     if any(m.series.startswith(hyperliquid.FIFTEEN_DEPLOYER) for m in closed):
         official = {m.ticker: m for m in await asyncio.to_thread(hyperliquid.settlements)}

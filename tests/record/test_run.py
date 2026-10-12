@@ -136,7 +136,8 @@ def test_the_15_minute_windows_settle_as_the_explorer_says_and_the_daily_by_the_
     conn = database.connect(tmp_path / "history.sqlite")
     database.upsert_markets(conn, [hyperliquid_window("#113720", close), hyperliquid_window("#113730", close),
                                    hyperliquid_window("#109970", close, "recurring-BTC-1d", 82994.0),
-                                   hyperliquid_window("#100000", now - run.SETTLE_REACH - 60), hyperliquid_window("#113760", now + 800)])
+                                   hyperliquid_window("#100000", now - run.SETTLE_REACH - 60), hyperliquid_window("#113760", now + 800),
+                                   hyperliquid_window("#115400", close, "out-ETH-15m", 2545.1)])
     database.store_marks(conn, [("hyperliquid", "BTC", close - 2.0, 82990.0, None), ("hyperliquid", "BTC", close + 2.0, 83000.0, None)])
     backfilled = hyperliquid_window("#112000", close - 7200)
     monkeypatch.setattr(hyperliquid, "settlements", lambda: [replace(hyperliquid_window("#113720", close), result="yes", settled_at=close + 8.0),
@@ -149,6 +150,7 @@ def test_the_15_minute_windows_settle_as_the_explorer_says_and_the_daily_by_the_
     assert (settled["#109970"].settlement, settled["#109970"].result) == (82995.0, "yes")     # Halfway between the marks around.
     assert settled["#100000"].result is None and settled["#113760"].result is None          # Too long closed, and not closed.
     assert settled["#112000"].result == "no"                            # Never seen listed, stored from the explorer.
+    assert settled["#115400"].result is None                            # On a perp no longer tracked.
     assert sorted(logs) == ["hyperliquid out-BTC-15m #113720 settled yes against a strike of 83,984",
                             "hyperliquid recurring-BTC-1d #109970 settled yes against a strike of 82,994, the mark 82,995.00"]
 
