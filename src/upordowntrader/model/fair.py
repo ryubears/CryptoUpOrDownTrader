@@ -86,8 +86,8 @@ def tracking_variances(errors, open_times, close_times, windows=TRACKING_WINDOWS
     windows settled before it opened, at least least of them, else 0, so the price is taken as exact. errors are each
     window's log of the stand-in's settlement over the window's own, NaN where unknown, and the windows are oldest first.
     A window closing as another opens is left out of that one's, as its settlement comes seconds later. On Kalshi's
-    windows to 2026-10-12, the six exchanges' average missed by $3.50 or so in a standard deviation, and Coinbase's
-    minutes by $10: little beside 15 minutes of bitcoin's moves, most of the spread in the averaging minute.
+    windows to 2026-10-12, the six exchanges' average missed by $3.26 in root mean square, and Coinbase's minutes over
+    2026 by $9.69: little beside 15 minutes of bitcoin's moves, but most of the spread in the averaging minute.
     """
     errors = np.asarray(errors, dtype=float)
     known = np.isfinite(errors)

@@ -64,6 +64,13 @@ def test_what_an_order_took_is_there_again_once_the_level_has_emptied():
     assert [(o["time"], o["offered"]) for o in orders] == [(10.0, 150.0), (11.0, 100.0)]    # 62 cents never emptied.
 
 
+def test_a_one_sided_book_blends_as_a_market_sure_of_the_window():
+    fit = fair.Fit(np.ones(fair.MINUTES), np.full(fair.MINUTES, 8), np.tile([0.0, 0.9, 0.1], (fair.MINUTES, 1)))
+    b = book((5.0, [], [[0.001, 500.0]]), (8.0, [], []))       # A 0.1 cent ask and no bid, then nothing at all.
+    blended = replay.blend_with_book(np.array([0.75, 0.75]), b, np.array([6.0, 9.0]), 10.0, fit)
+    assert blended[0] < 0.01 and blended[1] == 0.75             # Not the model's 75% against a decided book.
+
+
 def test_no_order_goes_when_it_would_land_after_the_close():
     b = book((5.0, BIDS, ASKS))
     assert replay.take_edges(np.array([899.95]), np.array([0.70]), b, close_time=900, up=True) == []

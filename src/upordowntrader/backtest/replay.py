@@ -200,10 +200,14 @@ def side_levels(book, at, side):
 def blend_with_book(chances, book, times, close_time, fit):
     """
     The model's chances at the times blended with the market's mid then, see fair.blended(), and left as they are where
-    the book lacked a side.
+    the book was empty. An empty side counts as a bid of 0 or an ask of 1, as no one would pay more or take less: a book
+    of a 0.1 cent ask alone has decided the window, and the model's own chance in its place made an edge of every such
+    book, all lost on the windows to 2026-10-12.
     """
     at = np.searchsorted(book.times, times, side="right") - 1
-    mid = np.where(at >= 0, (book.bid[np.maximum(at, 0)] + book.ask[np.maximum(at, 0)]) / 2, np.nan)
+    bid = np.where(at >= 0, book.bid[np.maximum(at, 0)], np.nan)
+    ask = np.where(at >= 0, book.ask[np.maximum(at, 0)], np.nan)
+    mid = np.where(np.isnan(bid) & np.isnan(ask), np.nan, (np.nan_to_num(bid, nan=0.0) + np.nan_to_num(ask, nan=1.0)) / 2)
     return np.where(np.isnan(mid), chances, fair.blended(mid, chances, close_time - times, fit))
 
 
