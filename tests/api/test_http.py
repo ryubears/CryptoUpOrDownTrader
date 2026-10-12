@@ -32,6 +32,12 @@ def test_a_429_is_retried_after_the_wait_the_server_asks_for(serve, slept):
     assert slept == [3.0]
 
 
+def test_a_post_sends_its_body_as_json(serve):
+    sent = serve(lambda request: httpx.Response(200, json={"ok": 1}))
+    assert http.post_json(URL, {"type": "outcomeMeta"}) == {"ok": 1}
+    assert sent[0].method == "POST" and sent[0].headers["content-type"] == "application/json" and sent[0].content == b'{"type":"outcomeMeta"}'
+
+
 def test_network_errors_are_retried_until_an_answer_comes(serve, slept):
     answers = [httpx.ConnectError("refused"), httpx.ConnectError("refused"), httpx.Response(200, json=[1])]
 

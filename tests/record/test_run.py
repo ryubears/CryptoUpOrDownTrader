@@ -4,7 +4,8 @@ Tests for the recording process, with stand ins for Kalshi's market reads and st
 
 import asyncio
 import time
-from upordowntrader.api import kalshi
+from dataclasses import replace
+from upordowntrader.api import hyperliquid, kalshi
 from upordowntrader.db import database
 from upordowntrader.db.models import Market
 from upordowntrader.record import run
@@ -108,18 +109,70 @@ def test_settling_reads_only_closed_windows_and_keeps_the_strike(tmp_path, monke
     assert len(asked) == 1                                               # Nothing left to settle.
 
 
+def hyperliquid_window(ticker, close_time, series="out-BTC-15m", strike=83984.0):
+    """
+    A Market for one of Hyperliquid's windows, closing at close_time.
+    """
+    period = 86400 if series.startswith("recurring") else 900
+    return Market("hyperliquid", ticker, f"{series}-{ticker}", series, int(close_time) - period, int(close_time), strike, None, None, None)
+
+
+def test_a_hyperliquid_refresh_streams_the_windows_not_closed_and_keeps_the_perps(tmp_path, monkeypatch):
+    now = time.time()
+    found = [hyperliquid_window("#113720", now - 30), hyperliquid_window("#113760", now + 870)]
+    monkeypatch.setattr(hyperliquid, "windows", lambda: found)
+    conn = database.connect(tmp_path / "history.sqlite")
+    stream = FakeStream(["BTC", "#113000", "#113720"], None)
+    recorder = Recorder(conn, "hyperliquid")
+    recorder.books = {"#113000": object(), "#113720": object()}
+    asyncio.run(run.refresh_hyperliquid(conn, stream, recorder))
+    assert stream.wanted == {"BTC", "#113760"} and recorder.books == {}
+    assert [m.ticker for m in database.load_markets(conn, "hyperliquid")] == ["#113720", "#113760"]
+
+
+def test_the_15_minute_windows_settle_as_the_explorer_says_and_the_daily_by_the_marks(tmp_path, monkeypatch):
+    now = time.time()
+    close = int(now) - 100
+    conn = database.connect(tmp_path / "history.sqlite")
+    database.upsert_markets(conn, [hyperliquid_window("#113720", close), hyperliquid_window("#113730", close),
+                                   hyperliquid_window("#109970", close, "recurring-BTC-1d", 82994.0),
+                                   hyperliquid_window("#100000", now - run.SETTLE_REACH - 60), hyperliquid_window("#113760", now + 800)])
+    database.store_marks(conn, [("hyperliquid", "BTC", close - 2.0, 82990.0, None), ("hyperliquid", "BTC", close + 2.0, 83000.0, None)])
+    backfilled = hyperliquid_window("#112000", close - 7200)
+    monkeypatch.setattr(hyperliquid, "settlements", lambda: [replace(hyperliquid_window("#113720", close), result="yes", settled_at=close + 8.0),
+                                                             replace(backfilled, result="no", settled_at=close - 7192.0)])
+    logs = []
+    asyncio.run(run.settle_hyperliquid(conn, logs.append))
+    settled = {m.ticker: m for m in database.load_markets(conn, "hyperliquid")}
+    assert (settled["#113720"].result, settled["#113720"].settled_at) == ("yes", close + 8.0)
+    assert settled["#113730"].result is None                            # Not settled by its deployer yet.
+    assert (settled["#109970"].settlement, settled["#109970"].result) == (82995.0, "yes")     # Halfway between the marks around.
+    assert settled["#100000"].result is None and settled["#113760"].result is None          # Too long closed, and not closed.
+    assert settled["#112000"].result == "no"                            # Never seen listed, stored from the explorer.
+    assert sorted(logs) == ["hyperliquid out-BTC-15m #113720 settled yes against a strike of 83,984",
+                            "hyperliquid recurring-BTC-1d #109970 settled yes against a strike of 82,994, the mark 82,995.00"]
+
+
+def test_a_daily_window_without_marks_on_both_sides_of_its_close_waits(tmp_path):
+    conn = database.connect(tmp_path / "history.sqlite")
+    database.store_marks(conn, [("hyperliquid", "BTC", 1000.0, 82990.0, None)])
+    assert run.interpolated_mark(conn, "BTC", 1010) is None and run.interpolated_mark(conn, "ETH", 1010) is None
+
+
 def test_a_short_run_records_the_open_windows_books_and_the_exchanges_quotes(tmp_path, monkeypatch):
     now = time.time()
     monkeypatch.setattr(kalshi, "KalshiBookStream", FakeStream)
+    monkeypatch.setattr(hyperliquid, "HyperliquidBookStream", FakeStream)
     monkeypatch.setattr(run, "QUOTE_STREAMS", {"coinbase": (FakeStream, "BTC-USD"), "kraken": (FakeStream, "BTC/USD")})
     monkeypatch.setattr(kalshi, "windows", lambda series, start, end: [window("KXBTC15M-B-15", now + 870, 80010.0)])
     monkeypatch.setattr(kalshi, "markets", lambda tickers: [])
+    monkeypatch.setattr(hyperliquid, "windows", lambda: [hyperliquid_window("#113760", now + 870)])
     conn = database.connect(tmp_path / "history.sqlite")
     logs = []
     asyncio.run(run.record(conn, seconds=2.5, log=logs.append))
-    tickers = {row[0] for row in conn.execute("SELECT ticker FROM books")}
-    assert tickers == {"KXBTC15M-B-15"} and conn.execute("SELECT COUNT(*) FROM books").fetchone()[0] >= 5
+    tickers = {row[0] for row in conn.execute("SELECT ticker FROM books")} - set(hyperliquid.UNDERLYINGS)    # The fake sends the perps books.
+    assert tickers == {"KXBTC15M-B-15", "#113760"} and conn.execute("SELECT COUNT(*) FROM books WHERE venue = 'kalshi'").fetchone()[0] >= 5
     quotes = conn.execute("SELECT source, COUNT(*), MIN(bid), MAX(ask) FROM quotes GROUP BY source").fetchall()
     assert [q[0] for q in quotes] == ["coinbase", "kraken"] and all(q[1] >= 1 and q[2] < q[3] for q in quotes)
-    assert logs[0] == "recording KXBTC15M, 5 levels a side, and the quotes of coinbase, kraken"
-    assert logs[-2].startswith("kalshi tracking 1 books") and logs[-1].startswith("coinbase")
+    assert logs[0] == "recording KXBTC15M, 5 levels a side, the quotes of coinbase, kraken, and Hyperliquid's up or down windows on BTC"
+    assert [line.split()[0] for line in logs[-4:]] == ["kalshi", "coinbase", "hyperliquid", "hyperliquid"]

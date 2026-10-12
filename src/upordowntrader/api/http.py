@@ -1,10 +1,10 @@
 """
 HTTP requests shared by the exchange clients.
 
-request() sends a GET through a host's rate limiter, and retries network errors, rate limit answers, and server errors,
-waiting as long as the server asks when it says, so a client can page through a year of candles without minding either.
-Any other error status raises RequestFailed with what the server sent. One httpx client keeps connections open between
-calls, since paging through history makes thousands of calls to the same host.
+request() sends a GET, or a POST of a JSON body, through a host's rate limiter, and retries network errors, rate limit
+answers, and server errors, waiting as long as the server asks when it says, so a client can page through a year of
+candles without minding either. Any other error status raises RequestFailed with what the server sent. One httpx client
+keeps connections open between calls, since paging through history makes thousands of calls to the same host.
 """
 
 import httpx
@@ -83,16 +83,17 @@ def retry_delay(response, attempt):
     return asked if asked <= MAX_RETRY_AFTER else None
 
 
-def request(url, params=None, limiter=None):
+def request(url, params=None, limiter=None, body=None):
     """
-    GET a URL through the limiter and return the response. Network errors and the statuses in RETRY_STATUSES are retried,
-    RETRIES tries in all. Any other error status, or a retryable one that outlasts the tries, raises RequestFailed.
+    GET a URL through the limiter, or POST body as JSON when one is given, and return the response. Network errors and
+    the statuses in RETRY_STATUSES are retried, RETRIES tries in all. Any other error status, or a retryable one that
+    outlasts the tries, raises RequestFailed.
     """
     for attempt in range(1, RETRIES + 1):
         if limiter:
             limiter.wait()
         try:
-            response = CLIENT.get(url, params=params)
+            response = CLIENT.get(url, params=params) if body is None else CLIENT.post(url, json=body)
         except httpx.TransportError:
             if attempt == RETRIES:
                 raise
@@ -111,6 +112,13 @@ def get_json(url, params=None, limiter=None):
     GET a URL and parse the JSON body, see request().
     """
     return request(url, params, limiter).json()
+
+
+def post_json(url, body, limiter=None):
+    """
+    POST body as JSON to a URL and parse the JSON answer, see request().
+    """
+    return request(url, limiter=limiter, body=body).json()
 
 
 def get_bytes(url, params=None, limiter=None):

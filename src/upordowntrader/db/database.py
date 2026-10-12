@@ -166,6 +166,24 @@ def store_quotes(conn, rows):
         conn.executemany("INSERT INTO quotes (source, received, sent, bid, bid_size, ask, ask_size) VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
 
 
+def store_marks(conn, rows):
+    """
+    Store perps' marks, each a (venue, coin, received, mark, oracle) tuple, in one transaction.
+    """
+    with conn:
+        conn.executemany("INSERT INTO marks (venue, coin, received, mark, oracle) VALUES (?, ?, ?, ?, ?)", rows)
+
+
+def read_marks(conn, venue, coin, start, end):
+    """
+    A perp's marks received from start up to end, in seconds since 1970, as a numpy array of (received, mark, oracle) rows,
+    oldest first, NaN for an oracle price not sent.
+    """
+    rows = conn.execute("SELECT received, mark, oracle FROM marks WHERE venue = ? AND coin = ? AND received >= ? AND received < ? ORDER BY received",
+                        (venue, coin, float(start), float(end))).fetchall()
+    return np.array([(r, m, np.nan if o is None else o) for r, m, o in rows], dtype=float).reshape(-1, 3)
+
+
 def insert_gap(conn, gap):
     """
     Record a stretch when a venue's feed was down.

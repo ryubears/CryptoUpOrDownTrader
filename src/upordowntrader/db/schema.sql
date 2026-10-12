@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS gaps (
 -- Each exchange's best bid and ask, for a stand-in for BRTI, each time its best bid or ask price moved, and once a second
 -- while only a size changed, as record/quotes.py stores them.
 CREATE TABLE IF NOT EXISTS quotes (
-    source    TEXT NOT NULL,        -- 'coinbase', 'kraken', 'bitstamp', 'gemini', 'bullish', or 'cryptocom'.
+    source    TEXT NOT NULL,        -- 'coinbase', 'kraken', 'bitstamp', 'gemini', 'bullish', 'cryptocom', or 'hyperliquid'.
     received  REAL NOT NULL,        -- When the quote reached us, in seconds since 1970 by our clock.
     sent      REAL,                 -- When the exchange says it was, where it does.
     bid       REAL,                 -- The best bid, null when there is none.
@@ -83,6 +83,18 @@ CREATE TABLE IF NOT EXISTS quotes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_quotes_source ON quotes (source, received);
+
+-- A venue's perps' mark and oracle prices, each change as it came, which some venues' window markets settle on, as
+-- record/marks.py stores them. Hyperliquid's say no time, so they go by ours.
+CREATE TABLE IF NOT EXISTS marks (
+    venue     TEXT NOT NULL,        -- 'hyperliquid'.
+    coin      TEXT NOT NULL,        -- The perp, 'BTC'.
+    received  REAL NOT NULL,        -- When the price reached us, in seconds since 1970 by our clock.
+    mark      REAL NOT NULL,        -- The venue's mark price.
+    oracle    REAL                  -- The venue's index of spot prices, null when it sent none.
+);
+
+CREATE INDEX IF NOT EXISTS idx_marks ON marks (venue, coin, received);
 
 -- A window market's best Yes bid and ask minute by minute, from the venue's candlesticks, see history/markets.py.
 CREATE TABLE IF NOT EXISTS minutes (
