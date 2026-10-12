@@ -8,7 +8,12 @@ random walk without drift, so the settlement average lands around its expected v
 per second and the seconds of variance the averaging leaves, see averaging_seconds(). The chance of Up is the share of
 that spread above the strike, found from the z score, how far the expected settlement is above the strike in spreads:
 
-    z = log(expected settlement / strike) / sqrt(variance per second * averaging seconds)
+    z = log(expected settlement / strike) / sqrt(variance per second * averaging seconds + tracking variance)
+
+BRTI is published only under license, so the price is a stand-in for it, the exchanges BRTI is built from, and the
+readings taken are the stand-in's too. The tracking variance is that of the stand-in's log error in the settlement, which
+no time left removes: near the close, when the averaging leaves only seconds of variance, it is most of the spread, and
+without it a window decided by less than the stand-in's error looks certain. See fair.tracking_variances().
 
 A normal distribution is the textbook choice. Bitcoin jumps more often than a normal allows, so a Student t, with fatter
 tails, or the residuals of past windows themselves, may fit better. Every distribution here has a variance of 1, so a z
@@ -42,28 +47,29 @@ def expected_settlement(price, observed_sum, seconds_left, readings=READINGS):
     return (observed_sum + to_come * price) / readings
 
 
-def spreads(variance_per_second, seconds_left, readings=READINGS):
+def spreads(variance_per_second, seconds_left, readings=READINGS, tracking=0.0):
     """
-    The standard deviation of the log settlement average around its expected value.
+    The standard deviation of the log settlement average around its expected value, with the stand-in's tracking
+    variance, see the module's docstring, 0 when the price is the settlement's own.
     """
-    return np.sqrt(variance_per_second * averaging_seconds(seconds_left, readings))
+    return np.sqrt(variance_per_second * averaging_seconds(seconds_left, readings) + tracking)
 
 
-def z_scores(price, observed_sum, strike, seconds_left, variance_per_second, readings=READINGS):
+def z_scores(price, observed_sum, strike, seconds_left, variance_per_second, readings=READINGS, tracking=0.0):
     """
     How far the expected settlement is above the strike, in spreads. The chance of Up rises with it.
     """
     expected = expected_settlement(price, observed_sum, seconds_left, readings)
-    return np.log(expected / strike) / spreads(variance_per_second, seconds_left, readings)
+    return np.log(expected / strike) / spreads(variance_per_second, seconds_left, readings, tracking)
 
 
-def residuals(settlement, price, observed_sum, seconds_left, variance_per_second, readings=READINGS):
+def residuals(settlement, price, observed_sum, seconds_left, variance_per_second, readings=READINGS, tracking=0.0):
     """
     How far each settlement ended from the expected one, in spreads, the z score's counterpart after the fact: Up won when
     the residual is at least -z. Residuals have a spread of 1 when the variance forecast is right on average.
     """
     expected = expected_settlement(price, observed_sum, seconds_left, readings)
-    return np.log(settlement / expected) / spreads(variance_per_second, seconds_left, readings)
+    return np.log(settlement / expected) / spreads(variance_per_second, seconds_left, readings, tracking)
 
 
 def up_normal(z):

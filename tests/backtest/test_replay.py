@@ -4,6 +4,7 @@ Tests for the replay: the model's chances from the price before, the stand-in pr
 
 import numpy as np
 import pytest
+from dataclasses import replace
 from upordowntrader.backtest import replay
 from upordowntrader.db import database
 from upordowntrader.db.models import Market
@@ -47,6 +48,20 @@ def test_an_edge_is_taken_once_until_it_falls_below_the_threshold():
     b = book((5.0, BIDS, ASKS), (12.0, BIDS, [[0.69, 10.0]]), (13.0, BIDS, ASKS))
     orders = replay.take_edges(np.array([10.0, 11.0, 12.0, 13.0]), np.full(4, 0.70), b, close_time=900, up=True)
     assert [o["time"] for o in orders] == [10.0, 13.0]         # 11 is the same episode; it ended at 12, and 13 is a new one.
+
+
+def test_an_order_takes_only_what_the_last_left_and_none_goes_while_the_last_is_on_its_way():
+    b = book((5.0, BIDS, ASKS), (11.0, BIDS, [[0.60, 130.0], [0.62, 50.0]]))      # 30 more at 60 cents at 11.
+    times = np.array([10.0, 10.02, 10.04, 10.5, 11.0])
+    orders = replay.take_edges(times, np.array([0.70, 0.60, 0.70, 0.70, 0.70]), b, close_time=900, up=True)
+    # 10.02 ends the episode, but at 10.04 the first order is on its way, and at 10.5 the book shows only what it took.
+    assert [(o["time"], o["offered"], o["contracts"]) for o in orders] == [(10.0, 150.0, 150.0), (11.0, 30.0, 30.0)]
+
+
+def test_what_an_order_took_is_there_again_once_the_level_has_emptied():
+    b = book((5.0, BIDS, ASKS), (10.5, BIDS, ASKS[1:]), (10.7, BIDS, ASKS))       # 60 cents emptied, then 100 more came.
+    orders = replay.take_edges(np.array([10.0, 10.6, 11.0]), np.array([0.70, 0.60, 0.70]), b, close_time=900, up=True)
+    assert [(o["time"], o["offered"]) for o in orders] == [(10.0, 150.0), (11.0, 100.0)]    # 62 cents never emptied.
 
 
 def test_no_order_goes_when_it_would_land_after_the_close():
@@ -107,3 +122,19 @@ def test_a_moment_inside_the_averaging_minutes_first_second_counts_no_reading_ta
     before, inside, first = replay.window_chances(feed, variance, START, market, np.array([close - 60.0, close - 59.6, close - 59.0]))
     assert inside == pytest.approx(before, abs=0.01) and first == pytest.approx(before, abs=0.01)    # No jump into the minute.
 
+
+
+def test_the_settlement_error_is_the_stand_ins_average_on_brtis_level_over_kalshis():
+    market = Market("kalshi", "T", "E", "KXBTC15M", OPEN, OPEN + 900, 80_000.0, 80_010.0, "yes", None)
+    feed = flat_feed(80_050.0, [(OPEN + 800.0, 80_070.0)])                             # Runs 50 above BRTI at the open.
+    assert replay.settlement_error(feed, market) == pytest.approx(np.log(80_020.0 / 80_010.0))
+    assert np.isnan(replay.settlement_error(feed, replace(market, settlement=None)))
+
+
+def test_the_tracking_variance_keeps_the_model_from_certainty_in_a_close_call():
+    market = Market("kalshi", "T", "E", "KXBTC15M", OPEN, OPEN + 900, 80_000.0, None, "yes", None)
+    feed = flat_feed(80_000.0, [(OPEN + 100.0, 80_002.0)])                             # $2 up through the whole minute.
+    variance, t = np.full(2 * 60, 1e-9), np.array([OPEN + 899.5])
+    exact = replay.window_chances(feed, variance, START, market, t)
+    tracked = replay.window_chances(feed, variance, START, market, t, tracking=(3.5 / 80_000) ** 2)
+    assert exact[0] > 0.99 and 0.6 < tracked[0] < 0.8

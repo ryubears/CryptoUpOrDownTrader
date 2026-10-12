@@ -134,11 +134,22 @@ def brti_gaps(windows, history, start, half_life=GAP_HALF_LIFE):
     return gaps, averaged
 
 
+def settlement_errors(windows, history, start, gap):
+    """
+    The log of Coinbase's stand-in for each window's settlement over BRTI's: its average of the minute before the close
+    less the gap to BRTI the model takes at the open, see brti_gaps(). NaN where Coinbase has no bar in that minute.
+    """
+    last = (np.array([m.close_time for m in windows]) - start) // 60 - 1
+    average = np.where(history.minute_missing[last] > 0, np.nan, history.minute_average[last])
+    return np.log((average - gap) / np.array([m.settlement for m in windows]))
+
+
 def z_scores(conn, windows, minutes, log=print):
     """
     The Marks of the scorable windows, see scorable(), the gaps at their opens, see brti_gaps(), and at each mark the
     model's z score as it was before 2026-10-12, from the calibration's forecast and the gap at the open alone, and as it
-    is now, see model/fair.py. Coinbase's days not stored yet are downloaded.
+    is now, see model/fair.py, with the tracking variance of Coinbase's stand-in, see settlement_errors(). Coinbase's days
+    not stored yet are downloaded.
     """
     first_day = datetime.fromtimestamp(windows[0].open_time, UTC).date() - timedelta(days=HISTORY_DAYS)
     end_day = datetime.fromtimestamp(windows[-1].close_time, UTC).date() + timedelta(days=1)
@@ -147,9 +158,12 @@ def z_scores(conn, windows, minutes, log=print):
     windows = [w for w, ok in zip(windows, scorable(windows, history, start), strict=True) if ok]
     m = marks(windows, minutes, history, start)
     gaps, gap = brti_gaps(windows, history, start)
+    tracking = fair.tracking_variances(settlement_errors(windows, history, start, gap), [w.open_time for w in windows],
+                                       [w.close_time for w in windows])
     before, _ = volatility.forecasts(history, *fair.FORECAST)
     z_before = pricing.z_scores(m.price - gaps[m.window], 0.0, m.strike, m.seconds_left, np.maximum(before[m.minute], fair.TINY))
-    z = pricing.z_scores(m.price - gap[m.window], 0.0, m.strike, m.seconds_left, np.maximum(fair.variance(history)[m.minute], fair.TINY))
+    z = pricing.z_scores(m.price - gap[m.window], 0.0, m.strike, m.seconds_left, np.maximum(fair.variance(history)[m.minute], fair.TINY),
+                         tracking=tracking[m.window])
     return m, gaps, z_before, z
 
 

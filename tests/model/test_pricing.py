@@ -69,3 +69,12 @@ def test_the_empirical_chance_is_the_share_of_past_residuals_above_minus_z():
     past = np.array([-2.0, -1.0, 0.0, 1.0, 2.0])
     assert pricing.up_empirical(0.5, past) == pytest.approx((3 + 0.5) / 6)  # -0.5 leaves 0, 1, and 2 above.
     assert 0 < pricing.up_empirical(-10.0, past) < pricing.up_empirical(10.0, past) < 1
+
+
+def test_the_tracking_variance_keeps_a_window_decided_by_less_than_it_uncertain():
+    price, tracking = 1.00002, 4e-5 ** 2                    # Every reading but the last taken, half a tracking error up.
+    exact = pricing.z_scores(price, 59 * price, 1.0, 1, SIGMA ** 2)
+    tracked = pricing.z_scores(price, 59 * price, 1.0, 1, SIGMA ** 2, tracking=tracking)
+    assert exact > 10 and tracked == pytest.approx(np.log(price) / 4e-5, rel=1e-3)
+    early = pricing.z_scores(1.001, 0.0, 1.0, 600, SIGMA ** 2, tracking=tracking)    # Ten minutes out it hardly matters.
+    assert early == pytest.approx(pricing.z_scores(1.001, 0.0, 1.0, 600, SIGMA ** 2), rel=1e-3)

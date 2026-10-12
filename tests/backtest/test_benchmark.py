@@ -71,3 +71,13 @@ def test_trades_take_the_quote_when_the_edge_after_the_fee_reaches_the_threshold
     count, mean, _ = benchmark.trades(np.array([0.60, 0.40]), m, 0.05, np.ones(2, dtype=bool))
     assert count == 2 and mean == pytest.approx(fair.edge(1.0, 0.51) * 0.5 + fair.edge(0.0, 0.51) * 0.5)   # Yes won, No lost.
     assert benchmark.trades(np.array([0.53, 0.47]), m, 0.05, np.ones(2, dtype=bool))[0] == 0
+
+
+def test_coinbases_settlement_is_its_average_of_the_last_minute_less_the_gap_at_the_open():
+    history = random_walk_history(2, 1e-4)
+    windows = [window(0, 80_000.0), window(1, 80_000.0)]
+    last = (windows[1].close_time - START) // 60 - 1
+    history.minute_missing[last] = 60                                             # Coinbase lost the second's last minute.
+    errors = benchmark.settlement_errors(windows, history, START, np.array([5.0, 6.0]))
+    average = history.minute_average[(windows[0].close_time - START) // 60 - 1]
+    assert errors[0] == pytest.approx(np.log((average - 5.0) / windows[0].settlement)) and np.isnan(errors[1])

@@ -4,7 +4,8 @@ The fair price of a window's Up as the replay and the benchmark compute it, and 
 The variance forecast is the calibration's best, see backtest/calibration.py, pulled DAY_SHARE of the way toward the
 day's, in log variance: on Kalshi's windows of 2026 the market priced more variance than the 30 minute forecast, most
 when the day had been busier than the last half hour, and the outcomes came out between the two. The chance of Up is
-then a Student t of the z score, see model/pricing.py.
+then a Student t of the z score, see model/pricing.py, whose spread includes how far the price's stand-in for BRTI missed
+the settlements of the windows before, see tracking_variances().
 
 Two corrections are fitted on Kalshi's settled windows, at each whole minute left, see backtest/benchmark.py:
 
@@ -36,6 +37,8 @@ MIN_MARKS = 500             # Settled marks a minute left needs before it is fit
 CLIP = 1e-4                 # Chances are kept this far from 0 and 1 in log odds.
 TINY = 1e-14                # Stands in for a variance of zero in a logarithm.
 FEE_RATE = 0.07             # Kalshi's taker fee is FEE_RATE * price * (1 - price) a contract, for KXBTC15M's multiplier of 1.
+TRACKING_WINDOWS = 96       # Windows settled before one whose tracking errors set its tracking variance: a day of 15 minutes.
+TRACKING_MIN = 8            # Of them a window needs before it has a tracking variance; with fewer the price is taken as exact.
 
 
 @dataclass
@@ -75,6 +78,25 @@ def chance(z, seconds_left, fit=None):
         return pricing.up_student_t(z, DOF)
     i = minutes_left(seconds_left) - 1
     return pricing.up_student_t(np.asarray(z) / fit.scale[i], fit.dof[i])
+
+
+def tracking_variances(errors, open_times, close_times, windows=TRACKING_WINDOWS, least=TRACKING_MIN):
+    """
+    The tracking variance of each window, see model/pricing.py: the mean square of the tracking errors of the last
+    windows settled before it opened, at least least of them, else 0, so the price is taken as exact. errors are each
+    window's log of the stand-in's settlement over the window's own, NaN where unknown, and the windows are oldest first.
+    A window closing as another opens is left out of that one's, as its settlement comes seconds later. On Kalshi's
+    windows to 2026-10-12, the six exchanges' average missed by $3.50 or so in a standard deviation, and Coinbase's
+    minutes by $10: little beside 15 minutes of bitcoin's moves, most of the spread in the averaging minute.
+    """
+    errors = np.asarray(errors, dtype=float)
+    known = np.isfinite(errors)
+    squares = np.concatenate([[0.0], np.cumsum(np.where(known, errors, 0.0) ** 2)])
+    counts = np.concatenate([[0], np.cumsum(known)])
+    settled = np.searchsorted(np.asarray(close_times), np.asarray(open_times), side="left")   # Windows closed before each opened.
+    first = np.maximum(settled - windows, 0)
+    count = counts[settled] - counts[first]
+    return np.where(count >= least, (squares[settled] - squares[first]) / np.maximum(count, 1), 0.0)
 
 
 def log_odds(p):

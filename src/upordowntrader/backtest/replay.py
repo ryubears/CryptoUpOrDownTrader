@@ -5,7 +5,9 @@ every edge would have made.
 Every window recorded from its open and settled is replayed. The model prices Up at every book change and every second
 from what was known then: Kalshi's exact strike, bitcoin's price from the exchanges BRTI is built from, see PRICE_SOURCES,
 moved onto BRTI's level by the gap between the two over the minute before the window opened, and the variance forecast of
-model/fair.py from Coinbase's minutes before. An exchange's quote is known QUOTE_DELAY after the exchange's time for it,
+model/fair.py from Coinbase's minutes before. That stand-in misses BRTI by a few dollars, which matters only near the
+close, so the model's spread includes how far it missed the settlements of the windows before, see settlement_error() and
+fair.tracking_variances(). An exchange's quote is known QUOTE_DELAY after the exchange's time for it,
 so the model is as current as a trader near the exchanges. That matters: on 2026-10-11 Kalshi's book moved within tens
 of milliseconds of bitcoin, and a model reading bitcoin a second late took the market's moves for edges.
 
@@ -19,11 +21,14 @@ below the threshold before it is taken again. The order takes every contract off
 reaches the threshold: an immediate or cancel limit at the worst such price, which reaches Kalshi LATENCY seconds after
 the change that opened the edge and fills against the book Kalshi had then, at that price or better. A tenth of a
 second is what SportsArb measured from AWS us-east-1, near Kalshi: a signed round trip of about 35 ms, and its copy of
-the book about 12 ms behind Kalshi's. From farther away it is slower.
+the book about 12 ms behind Kalshi's. From farther away it is slower. A side sends no order while its last is on the
+way, and the recorded books go on showing the contracts an order took, so later orders leave them be until the book
+shows they are gone, see still_resting().
 
 Each order says how many contracts were offered within the threshold as it was sent, and how many it filled, with two
 profits: the expected, the fair price's edge on each contract, which is what the trades make on average if the fair
-price is right, and the realized, from how the windows settled, which over few windows is mostly luck. The books keep
+price is right, and the realized, from how the windows settled, which over few windows is mostly luck: the report gives
+it with two standard errors that count each window once, as a window's orders share its outcome. The books keep
 BOOK_LEVELS levels a side, so an order whose every level kept was worth taking may have been offered more.
 
 Times are the venues' own, not this machine's, whose clock may be off: each book change at its matching engine time,
@@ -111,12 +116,13 @@ def price_at(feed, t):
     return np.where(known > 0, np.nansum(stacked, axis=0) / np.maximum(known, 1), np.nan)
 
 
-def window_chances(feed, variance, start, market, t, fit=None):
+def window_chances(feed, variance, start, market, t, fit=None, tracking=0.0):
     """
     The model's chance of Up at each of the times t inside a window, from what was known then, see the module's
     docstring, recalibrated by a fair.Fit when one is given. variance is the forecast per second at the end of each minute
-    from start. BRTI's settlement averages the readings at the end of each of the last 60 seconds, so the price known at
-    those moments stands in for them, and those taken by a time count as they were.
+    from start, and tracking the window's tracking variance, see fair.tracking_variances(). BRTI's settlement averages the
+    readings at the end of each of the last 60 seconds, so the price known at those moments stands in for them, and those
+    taken by a time count as they were.
     """
     t = np.asarray(t, dtype=float)
     readings = np.arange(1, 61) - 60                            # The ends of the 60 seconds before a moment.
@@ -129,8 +135,21 @@ def window_chances(feed, variance, start, market, t, fit=None):
     # least the whole minute, since a moment inside the minute's first second has no reading taken and all 60 to come.
     seconds_left = np.where(taken > 0, 60 - taken, np.maximum(market.close_time - t, 60))
     forecast = np.maximum(variance[(np.floor(t).astype(int) - start) // 60 - 1], fair.TINY)
-    z = pricing.z_scores(price, observed, market.strike, seconds_left, forecast)
+    z = pricing.z_scores(price, observed, market.strike, seconds_left, forecast, tracking=tracking)
     return fair.chance(z, seconds_left, fit)
+
+
+def settlement_error(feed, market):
+    """
+    The log of the stand-in's settlement over a window's own: the average of the price known at its 60 readings, moved
+    onto BRTI's level by the gap at the open as window_chances() moves it. NaN unless the window has settled and the price
+    was known at every reading.
+    """
+    if market.settlement is None:
+        return np.nan
+    readings = np.arange(1, 61) - 60
+    offset = np.mean(price_at(feed, market.open_time + readings)) - market.strike
+    return float(np.log((np.mean(price_at(feed, market.close_time + readings)) - offset) / market.settlement))
 
 
 # BOOKS
@@ -188,37 +207,87 @@ def blend_with_book(chances, book, times, close_time, fit):
     return np.where(np.isnan(mid), chances, fair.blended(mid, chances, close_time - times, fit))
 
 
+def resting(book, at, side, price):
+    """
+    The contracts the levels kept at change at show at a price for an order on a side, see side_levels(): 0 when the
+    price lies among them but none is there, and None when it lies beyond the levels kept, where the book says nothing.
+    """
+    levels = side_levels(book, at, side)
+    for p, c in levels:
+        if round(p, 6) == price:
+            return c
+    return None if len(levels) == BOOK_LEVELS and price > levels[-1][0] else 0.0
+
+
+def still_resting(taken, book, start, end, side):
+    """
+    Lower the contracts earlier orders on a side took at each price, taken as {price: contracts}, to the fewest the book
+    showed there at any change after start up to end. The recorded book goes on showing the orders a fill took, as the
+    fill is ours alone, until they leave it, and no more of them can still be there than the level held.
+    """
+    for j in range(start + 1, end + 1):
+        if not taken:
+            return
+        for price in list(taken):
+            c = resting(book, j, side, price)
+            if c is not None and c < taken[price]:
+                taken[price] = c
+                if c <= 0:
+                    del taken[price]
+
+
+def untaken(levels, taken):
+    """
+    The levels, as [price, contracts], less what earlier orders took at each price, those left empty dropped.
+    """
+    left = [(p, c - taken.get(round(p, 6), 0.0)) for p, c in levels]
+    return [(p, c) for p, c in left if c > 0]
+
+
 def take_edges(times, chances, book, close_time, up, threshold=THRESHOLD, latency=LATENCY):
     """
     The orders of one window under the trading rule, see the module's docstring. times and chances are the fair price
     of Up at each event, book the window's Book, and up how it settled. Returns a dict per order: when, the side,
     the best edge seen, the contracts offered within the threshold and their expected profit as sent, and the contracts
-    filled, their average price, and their expected and realized profits, in dollars.
+    filled, their average price, and their expected and realized profits, in dollars. An edge whose every contract an
+    earlier order took sends none.
     """
     at = np.searchsorted(book.times, times, side="right") - 1
     seen_ask = np.where(at >= 0, book.ask[np.maximum(at, 0)], np.nan)
     seen_bid = np.where(at >= 0, book.bid[np.maximum(at, 0)], np.nan)
     best_edges = {"yes": fair.edge(chances, seen_ask), "no": fair.edge(1 - chances, 1 - seen_bid)}
     armed, orders = {"yes": True, "no": True}, []
+    lands = {"yes": -np.inf, "no": -np.inf}     # When each side's last order lands.
+    taken = {"yes": {}, "no": {}}               # The contracts each side's orders took at each price, see still_resting().
+    checked = {"yes": 0, "no": 0}               # The book change taken was last brought up to.
     for i, t in enumerate(times):
         for side in ("yes", "no"):
             if not best_edges[side][i] >= threshold:    # Below it, or the side is empty: the next reach is a new episode.
                 armed[side] = True
                 continue
-            if not armed[side] or t + latency >= close_time:
+            if not armed[side] or t < lands[side] or t + latency >= close_time:
                 continue
-            armed[side] = False
             chance = chances[i] if side == "yes" else 1 - chances[i]
-            offered = [(p, c) for p, c in side_levels(book, at[i], side) if fair.edge(chance, p) >= threshold]
+            still_resting(taken[side], book, checked[side], at[i], side)
+            checked[side] = at[i]
+            worth = [(p, c) for p, c in side_levels(book, at[i], side) if fair.edge(chance, p) >= threshold]
+            offered = untaken(worth, taken[side])
+            if not offered:
+                continue
+            armed[side], lands[side] = False, t + latency
             limit = max(p for p, _ in offered)
             landed = np.searchsorted(book.times, t + latency, side="right") - 1
-            filled = [(p, c) for p, c in side_levels(book, landed, side) if p <= limit + 1e-9]
+            still_resting(taken[side], book, checked[side], landed, side)
+            checked[side] = landed
+            filled = untaken([(p, c) for p, c in side_levels(book, landed, side) if p <= limit + 1e-9], taken[side])
+            for p, c in filled:
+                taken[side][round(p, 6)] = taken[side].get(round(p, 6), 0.0) + c
             won = up if side == "yes" else not up
             contracts = sum(c for _, c in filled)
             orders.append({
                 "time": t, "side": side, "seconds_left": close_time - t, "edge": best_edges[side][i],
                 "offered": sum(c for _, c in offered), "offered_expected": sum(c * fair.edge(chance, p) for p, c in offered),
-                "every_level": len(offered) == BOOK_LEVELS, "contracts": contracts,
+                "every_level": len(worth) == BOOK_LEVELS, "contracts": contracts,
                 "price": sum(p * c for p, c in filled) / contracts if contracts else None,
                 "expected": sum(c * fair.edge(chance, p) for p, c in filled), "realized": sum(c * fair.edge(float(won), p) for p, c in filled),
                 "one_contract": fair.edge(float(won), filled[0][0]) if filled else None, "won": won,
@@ -255,16 +324,18 @@ def replay(conn, price_source, thresholds, latencies, fair_price="blend", log=pr
     start = int(datetime(first_day.year, first_day.month, first_day.day, tzinfo=UTC).timestamp())
     variance = fair.variance(history)
     feed = quote_feed(conn, price_source, windows[0].open_time, windows[-1].close_time)
+    tracking = fair.tracking_variances([settlement_error(feed, m) for m in windows], [m.open_time for m in windows],
+                                       [m.close_time for m in windows])
     columns = {name: [] for name in ("window", "left", "chance", "bid", "ask", "up")}
     trades = {(threshold, latency): [] for threshold in thresholds for latency in latencies}
     replayed = []
-    for market in windows:
+    for market, track in zip(windows, tracking, strict=True):
         t = np.arange(market.open_time + 1, market.close_time)
         if np.isnan(price_at(feed, [market.open_time - 59, market.open_time + 1])).any():
             continue                                            # The source has no price for this window yet.
         w = len(replayed)
         replayed.append(market)
-        chances = window_chances(feed, variance, start, market, t, fit)
+        chances = window_chances(feed, variance, start, market, t, fit, track)
         book = book_changes(conn, market.ticker)
         if fair_price == "blend":
             chances = blend_with_book(chances, book, t.astype(float), market.close_time, fit)
@@ -277,7 +348,7 @@ def replay(conn, price_source, thresholds, latencies, fair_price="blend", log=pr
         # Events: every book change inside the window, and every second, when the model's price may change.
         inside = book.times[(book.times > market.open_time) & (book.times < market.close_time)]
         events = np.unique(np.concatenate([inside, t.astype(float)]))
-        event_chances = window_chances(feed, variance, start, market, events, fit)
+        event_chances = window_chances(feed, variance, start, market, events, fit, track)
         if fair_price == "blend":
             event_chances = blend_with_book(event_chances, book, events, market.close_time, fit)
         valid = ~np.isnan(event_chances)
@@ -287,6 +358,17 @@ def replay(conn, price_source, thresholds, latencies, fair_price="blend", log=pr
     if not replayed:
         raise SystemExit(f"no recorded window has {price_source} quotes from its open yet, run the recorder for a while")
     return replayed, {name: np.concatenate(values) for name, values in columns.items()}, trades
+
+
+def window_mean(values, weights, window):
+    """
+    The weighted mean of values and two standard errors that count each window once, as its orders share its outcome.
+    """
+    values, weights = np.asarray(values, dtype=float), np.asarray(weights, dtype=float)
+    mean = np.sum(weights * values) / np.sum(weights)
+    _, by_window = np.unique(window, return_inverse=True)
+    sums = np.bincount(by_window, weights=weights * (values - mean))
+    return mean, 2 * np.sqrt(np.sum(sums ** 2)) / np.sum(weights)
 
 
 def report(windows, per_second, trades, price_source, fair_price):
@@ -310,20 +392,25 @@ def report(windows, per_second, trades, price_source, fair_price):
         print(f"{label:>11}{s.sum():>9,}{spread:>7.1f}c{np.median(gap):>+12.1f}c{np.percentile(np.abs(gap), 90):>10.1f}c"
               f"{metrics.log_loss(d['chance'][s], d['up'][s]):>10.3f}{metrics.log_loss(mid[s], d['up'][s]):>11.3f}")
     print("Log loss: lower is better, a coin flip scores 0.693.")
-    print(f"\n{'threshold':>10}{'latency':>9}{'orders':>8}{'filled':>8}{'offered':>10}{'filled':>10}{'expected':>11}{'realized':>11}"
-          f"{'per contract':>14}{'one each':>10}")
-    print(f"{'':>35}{'contracts':>10}{'contracts':>10}{'profit':>11}{'profit':>11}{'expected':>14}{'realized':>10}")
+    print(f"\n{'threshold':>10}{'latency':>9}{'orders':>8}{'filled':>8}{'windows':>9}{'contracts':>11}{'expected':>11}{'realized':>11}"
+          f"{'a contract':>27}{'one each':>16}")
+    print(f"{'':>45}{'profit':>11}{'profit':>11}{'expected':>11}{'realized':>16}{'realized':>16}")
     for (threshold, latency), found in trades.items():
         filled = [o for o in found if o["contracts"]]
-        contracts = sum(o["contracts"] for o in filled)
+        if not filled:
+            print(f"{threshold:>9.0%} {latency:>8.2f}s{len(found):>8}{0:>8}")
+            continue
+        window = [o["window"] for o in filled]
+        contracts = np.array([o["contracts"] for o in filled])
         expected, realized = sum(o["expected"] for o in filled), sum(o["realized"] for o in filled)
-        one = [o["one_contract"] for o in filled]
-        print(f"{threshold:>9.0%} {latency:>8.2f}s{len(found):>8}{len(filled):>8}{sum(o['offered'] for o in found):>10,.0f}{contracts:>10,.0f}"
-              f"{expected:>+10.0f}${realized:>+10.0f}${100 * expected / contracts if contracts else 0:>+12.1f}c"
-              f"{100 * np.mean(one) if one else 0:>+9.1f}c")
-    print("Offered: contracts within the threshold as each order was sent. Expected profit: the fair price's edge on each contract filled,")
-    print("what the trades make on average if it is right. Realized: from how the windows settled. One each: the average realized")
-    print("profit of taking a single contract per order, the best one. All after Kalshi's taker fee.")
+        per_contract, error = window_mean([o["realized"] / o["contracts"] for o in filled], contracts, window)
+        one, one_error = window_mean([o["one_contract"] for o in filled], np.ones(len(filled)), window)
+        print(f"{threshold:>9.0%} {latency:>8.2f}s{len(found):>8}{len(filled):>8}{len(set(window)):>9}{contracts.sum():>11,.0f}"
+              f"{expected:>+10.0f}${realized:>+10.0f}${100 * expected / contracts.sum():>+10.1f}c"
+              f"{100 * per_contract:>+9.1f} ±{100 * error:>4.1f}c{100 * one:>+9.1f} ±{100 * one_error:>4.1f}c")
+    print("Expected profit: the fair price's edge on each contract filled, what the trades make on average if it is right. Realized:")
+    print("from how the windows settled, with two standard errors that count each window once. One each: the realized profit of")
+    print("taking a single contract an order, the best one. All after Kalshi's taker fee.")
     key = (THRESHOLD, LATENCY) if (THRESHOLD, LATENCY) in trades else next(iter(trades))
     found = trades[key]
     if found:

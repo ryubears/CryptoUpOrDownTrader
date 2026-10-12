@@ -292,8 +292,10 @@ def model(conn, windows, readings):
 
 if __name__ == "__main__":
     conn = database.connect()
-    windows = [m for m in database.load_markets(conn, "hyperliquid") if m.result in ("yes", "no")]
-    log(f"{len(windows)} settled Hyperliquid windows, {sum(m.series.startswith('out-') for m in windows)} of the 15 minute series")
+    # The windows of the perps still recorded: those of others stored before, as ETH's and HYPE's to 2026-10-12, stop short.
+    windows = [m for m in database.load_markets(conn, "hyperliquid") if m.result in ("yes", "no") and perp_of(m) in hyperliquid.UNDERLYINGS]
+    log(f"{len(windows)} settled Hyperliquid windows on {', '.join(hyperliquid.UNDERLYINGS)}, "
+        f"{sum(m.series.startswith('out-') for m in windows)} of the 15 minute series")
     fifteen = [m for m in windows if m.series.startswith("out-")]
     rules(conn, fifteen)
     venues(conn, fifteen)

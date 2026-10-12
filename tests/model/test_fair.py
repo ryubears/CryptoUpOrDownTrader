@@ -54,3 +54,11 @@ def test_a_minute_with_too_few_marks_keeps_the_model_and_the_markets_price():
     assert fit.scale.tolist() == [1.0] * fair.MINUTES and fit.dof.tolist() == [fair.DOF] * fair.MINUTES
     market = np.array([0.2, 0.5, 0.9])
     assert fair.blended(market, np.array([0.9, 0.1, 0.5]), [100, 400, 800], fit) == pytest.approx(market)
+
+
+def test_the_tracking_variance_is_the_mean_square_of_the_errors_of_the_windows_settled_before():
+    opens = 900.0 * np.arange(7)
+    errors = 1e-5 * np.array([1, -1, 2, np.nan, -2, 1, 1])
+    variances = fair.tracking_variances(errors, opens, opens + 900, windows=4, least=2)
+    # Each window opens as the one before closes, so that one is left out: window 3 has 0 and 1, window 6 the last 4, 1 to 4.
+    assert variances == pytest.approx(1e-10 * np.array([0, 0, 0, 1, 2, 2, 3]))
