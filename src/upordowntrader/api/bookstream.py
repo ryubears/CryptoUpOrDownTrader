@@ -9,6 +9,9 @@ connect, subscribe, read, and reconnect loop. A venue subclass supplies
 how to connect, what to send to subscribe, how to turn a queued change
 into a frame, and how to apply one message.
 
+A venue that closes a connection it hears nothing from asks for a
+keepalive, a frame sent every keepalive_seconds, see keepalive().
+
 A venue can also stop a market trading while its book stays up: pause it,
 close it, or decide it. A stream that hears so from its venue says it
 through on_state, see set_state().
@@ -59,6 +62,7 @@ class BookStream:
 
     name = "venue"                  # Used in log lines.
     stale_seconds = STALE_SECONDS
+    keepalive_seconds = None        # Seconds between keepalive frames, for a venue that wants them, see keepalive().
     depth = 5                       # Levels a side passed to on_book. The recorder sets it to what it keeps.
 
     def __init__(self, contract_ids, on_book, on_gap=None, log=print):
@@ -161,6 +165,12 @@ class BookStream:
         Clear any per connection state before a new connection. Books are cleared by the loop.
         """
 
+    def keepalive(self):
+        """
+        The frame, as sent, a venue with keepalive_seconds set wants every so often to keep a connection open.
+        """
+        raise NotImplementedError
+
     # LOOP
 
     async def send_commands(self, ws):
@@ -170,6 +180,14 @@ class BookStream:
         while True:
             action, contract_ids = await self.commands.get()
             await self.send_command(ws, action, contract_ids)
+
+    async def send_keepalives(self, ws):
+        """
+        Send the venue's keepalive frame every keepalive_seconds, forever.
+        """
+        while True:
+            await asyncio.sleep(self.keepalive_seconds)
+            await ws.send(self.keepalive())
 
     async def read(self, ws):
         """
@@ -209,11 +227,14 @@ class BookStream:
                         self.on_gap(self.down_since, time.time(), sorted(self.wanted))
                         self.down_since = None
                     self.num_failures = 0
-                    sender = asyncio.create_task(self.send_commands(ws))
+                    tasks = [asyncio.create_task(self.send_commands(ws))]
+                    if self.keepalive_seconds:
+                        tasks.append(asyncio.create_task(self.send_keepalives(ws)))
                     try:
                         await self.read(ws)
                     finally:
-                        sender.cancel()
+                        for task in tasks:
+                            task.cancel()
                         self.ws = None
             except Reconnect as e:
                 self.log(f"{self.name} stream {e}, reconnecting")

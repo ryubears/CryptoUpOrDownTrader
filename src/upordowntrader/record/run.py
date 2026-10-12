@@ -46,7 +46,7 @@ import signal
 import subprocess
 import time
 from dataclasses import replace
-from upordowntrader.api import bitstamp, bullish, coinbase, cryptocom, gemini, hyperliquid, kalshi, kraken
+from upordowntrader.api import binance, bitstamp, bullish, bybit, coinbase, cryptocom, deribit, gemini, hyperliquid, kalshi, kraken, okx
 from upordowntrader.common.log import log, on_failure
 from upordowntrader.common.paths import ROOT
 from upordowntrader.common.periodic import Periodic
@@ -68,13 +68,18 @@ HYPERLIQUID_DELAY = 30      # Seconds after a quarter hour before Hyperliquid's 
 SETTLE_REACH = 6 * 3600     # Seconds after its close a Hyperliquid window is still looked for in the explorer, which keeps
                             # about 12 hours of the 15 minute series' settlements.
 MARK_REACH = 30             # Seconds around a daily window's close its settlement reads marks from.
-# Each exchange whose best bid and ask are recorded, with its quote stream and its name for bitcoin in dollars. All but
-# Hyperliquid are among the exchanges BRTI is built from, as CF Benchmarks listed them on 2026-08-24; LMAX Digital, the
-# other, has no public feed to read without an account. Hyperliquid's is its BTC perp, which may move first.
+# Each exchange whose best bid and ask are recorded, with its quote stream and its name for bitcoin in dollars. The first
+# six are among the exchanges BRTI is built from, as CF Benchmarks listed them on 2026-08-24; LMAX Digital, the other, has
+# no public feed to read without an account. The rest are bitcoin perpetuals, where price moves may start, recorded to
+# see which leads, see backtest/lead.py: Hyperliquid's, the busiest four elsewhere that answer the AWS instance, three in
+# tether, and Coinbase Derivatives' US one.
 QUOTE_STREAMS = {"coinbase": (coinbase.CoinbaseQuoteStream, "BTC-USD"), "kraken": (kraken.KrakenQuoteStream, "BTC/USD"),
                  "bitstamp": (bitstamp.BitstampQuoteStream, "btcusd"), "gemini": (gemini.GeminiQuoteStream, "BTCUSD"),
                  "bullish": (bullish.BullishQuoteStream, "BTCUSD"), "cryptocom": (cryptocom.CryptoComQuoteStream, "BTC_USD"),
-                 "hyperliquid": (hyperliquid.HyperliquidQuoteStream, "BTC")}
+                 "hyperliquid": (hyperliquid.HyperliquidQuoteStream, "BTC"), "binance perp": (binance.BinanceQuoteStream, "BTCUSDT"),
+                 "bybit perp": (bybit.BybitQuoteStream, "BTCUSDT"), "okx perp": (okx.OkxQuoteStream, "BTC-USDT-SWAP"),
+                 "deribit perp": (deribit.DeribitQuoteStream, "BTC-PERPETUAL"),
+                 "coinbase perp": (coinbase.CoinbasePerpQuoteStream, "BIP-20DEC30-CDE")}
 
 
 async def refresh(conn, stream, recorder, reads):

@@ -180,3 +180,30 @@ def test_reconnect_closes_the_live_connection_so_the_loop_connects_again(monkeyp
     assert stream.logs == ["scripted stream dropped (ConnectionResetError: closed), reconnecting"]
     assert stream.used == [first, second] and len(stream.gaps) == 1
 
+
+
+class KeptAliveStream(ScriptedStream):
+    """
+    A scripted venue that wants a keepalive every 10 ms.
+    """
+
+    keepalive_seconds = 0.01
+
+    def keepalive(self):
+        return "ping"
+
+
+def test_a_venue_that_wants_keepalives_gets_one_every_so_often_while_connected(monkeypatch):
+    monkeypatch.setattr(bookstream, "RECONNECT_SECONDS", (0,))
+    conn = FakeConnection([], then="hang")
+    stream = KeptAliveStream(["x"], [conn])
+    stream.stale_seconds = 60
+
+    async def scenario():
+        task = asyncio.create_task(stream.run())
+        await asyncio.sleep(0.055)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    asyncio.run(scenario())
+    assert conn.sent[0] == ("subscribe", ["x"]) and 3 <= conn.sent.count("ping") <= 6 and len(conn.sent) == 1 + conn.sent.count("ping")

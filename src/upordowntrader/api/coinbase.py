@@ -5,18 +5,24 @@ best bid and ask from the websocket.
 Coinbase is one of the exchanges CF Benchmarks builds BRTI from, the index Kalshi and Polymarket US settle on, so its
 BTC-USD price is a close stand-in for the settlement price. Its shortest candle is 1 minute; the websocket gives every
 change of the book, in batches every 50 ms.
+
+Coinbase Derivatives, its US futures exchange, lists BIP-20DEC30-CDE, a perpetual style bitcoin future whose price may
+move before the exchanges', which backtest/lead.py measures. Its book comes from the Advanced Trade websocket, also read
+without an API key, in another format, see CoinbasePerpQuoteStream.
 """
 
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from upordowntrader.api.bookstream import BookStream
+from upordowntrader.api.bookstream import BookStream, Reconnect
 from upordowntrader.api.http import RateLimiter, get_json, utc
 from upordowntrader.common.timeutil import epoch
 
 API = "https://api.exchange.coinbase.com"
 WS_URL = "wss://ws-feed.exchange.coinbase.com"
 BOOK_CHANNEL = "level2_batch"   # The whole book, then each change, batched every 50 ms. Public, unlike the unbatched level2.
+ADVANCED_WS_URL = "wss://advanced-trade-ws.coinbase.com"
+CONTRACT_BTC = 0.01         # Bitcoin a contract of Coinbase Derivatives' bitcoin futures, BIP-20DEC30-CDE's among them.
 PAGE = 300              # The most candle lengths one call may span.
 GRANULARITIES = (60, 300, 900, 3600, 21600, 86400)  # The candle lengths Coinbase offers, in seconds.
 LIMITER = RateLimiter(5)    # Coinbase allows 10 public calls a second per IP, and this keeps to half.
@@ -157,3 +163,56 @@ class CoinbaseQuoteStream(BookStream):
         self.on_book(product, self.top(book, "bids"), self.top(book, "asks"), sent)
         return True
 
+
+class CoinbasePerpQuoteStream(CoinbaseQuoteStream):
+    """
+    The best bid and ask of Coinbase Derivatives' futures, such as BIP-20DEC30-CDE, from the Advanced Trade websocket's
+    level 2 channel. As on the exchange's, the first message of each product is the whole book and each after it the
+    levels that changed, kept the same way, see apply(), here with each level's time and in contracts of CONTRACT_BTC.
+    Every message of a connection is numbered, so a skip, a message lost, rebuilds the connection, and the heartbeats
+    channel keeps it open while the book is quiet, as Coinbase closes a connection without updates in a minute or so.
+    """
+
+    name = "coinbase perp"
+
+    def reset(self):
+        self.sequence = None        # The number of the connection's last message.
+
+    def connect(self):
+        return self.open_connection(ADVANCED_WS_URL)
+
+    async def subscribe(self, ws):
+        await ws.send(json.dumps({"type": "subscribe", "channel": "heartbeats"}))
+        await ws.send(json.dumps({"type": "subscribe", "product_ids": sorted(self.wanted), "channel": "level2"}))
+
+    async def send_command(self, ws, action, product_ids):
+        await ws.send(json.dumps({"type": "subscribe" if action == "add" else "unsubscribe", "product_ids": product_ids, "channel": "level2"}))
+
+    def handle(self, raw):
+        m = json.loads(raw)
+        if m.get("type") == "error":
+            self.log(f"coinbase perp stream error: {m.get('message')}")
+            return False
+        sequence = m.get("sequence_num")
+        if sequence is not None:
+            if self.sequence is not None and sequence != self.sequence + 1:
+                raise Reconnect(f"skipped from message {self.sequence} to {sequence}")
+            self.sequence = sequence
+        if m.get("channel") != "l2_data":
+            return False                                        # A heartbeat, or a subscription's acknowledgement.
+        passed = False
+        for event in m.get("events") or []:
+            product, updates = event.get("product_id"), event.get("updates") or []
+            if product not in self.wanted or (event.get("type") != "snapshot" and product not in self.books):
+                continue
+            if event.get("type") == "snapshot":
+                self.books[product] = {"bids": {}, "asks": {}, "best": {"bids": None, "asks": None}}
+            book = self.books[product]
+            for update in updates:
+                self.apply(book, "bids" if update["side"] == "bid" else "asks", float(update["price_level"]),
+                           float(update["new_quantity"]) * CONTRACT_BTC)
+            # A snapshot's levels carry when each was last set, not when the book was, so it says no time, as the exchange's.
+            sent = max(epoch(u["event_time"]) for u in updates) if updates and event.get("type") != "snapshot" else None
+            self.on_book(product, self.top(book, "bids"), self.top(book, "asks"), sent)
+            passed = True
+        return passed

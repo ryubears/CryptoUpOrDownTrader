@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS gaps (
 -- Each exchange's best bid and ask, for a stand-in for BRTI, each time its best bid or ask price moved, and once a second
 -- while only a size changed, as record/quotes.py stores them.
 CREATE TABLE IF NOT EXISTS quotes (
-    source    TEXT NOT NULL,        -- 'coinbase', 'kraken', 'bitstamp', 'gemini', 'bullish', 'cryptocom', or 'hyperliquid'.
+    source    TEXT NOT NULL,        -- 'coinbase', 'kraken', 'bitstamp', 'gemini', 'bullish', 'cryptocom', 'hyperliquid', or a perp, as 'binance perp'.
     received  REAL NOT NULL,        -- When the quote reached us, in seconds since 1970 by our clock.
     sent      REAL,                 -- When the exchange says it was, where it does.
     bid       REAL,                 -- The best bid, null when there is none.
