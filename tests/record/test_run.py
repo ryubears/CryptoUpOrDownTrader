@@ -169,6 +169,7 @@ def test_a_short_run_records_the_open_windows_books_and_the_exchanges_quotes(tmp
     monkeypatch.setattr(kalshi, "windows", lambda series, start, end: [window("KXBTC15M-B-15", now + 870, 80010.0)])
     monkeypatch.setattr(kalshi, "markets", lambda tickers: [])
     monkeypatch.setattr(hyperliquid, "windows", lambda: [hyperliquid_window("#113760", now + 870)])
+    monkeypatch.setattr(run, "code_version", lambda: "6132fc7-dirty")
     conn = database.connect(tmp_path / "history.sqlite")
     logs = []
     asyncio.run(run.record(conn, seconds=2.5, log=logs.append))
@@ -176,5 +177,6 @@ def test_a_short_run_records_the_open_windows_books_and_the_exchanges_quotes(tmp
     assert tickers == {"KXBTC15M-B-15", "#113760"} and conn.execute("SELECT COUNT(*) FROM books WHERE venue = 'kalshi'").fetchone()[0] >= 5
     quotes = conn.execute("SELECT source, COUNT(*), MIN(bid), MAX(ask) FROM quotes GROUP BY source").fetchall()
     assert [q[0] for q in quotes] == ["coinbase", "kraken"] and all(q[1] >= 1 and q[2] < q[3] for q in quotes)
-    assert logs[0] == "recording KXBTC15M, 5 levels a side, the quotes of coinbase, kraken, and Hyperliquid's up or down windows on BTC"
+    assert logs[0] == ("recording KXBTC15M, 5 levels a side, the quotes of coinbase, kraken, and Hyperliquid's up or down windows on BTC, "
+                       "with code 6132fc7-dirty")
     assert [line.split()[0] for line in logs[-4:]] == ["kalshi", "coinbase", "hyperliquid", "hyperliquid"]

@@ -37,16 +37,18 @@ is waiting.
 
 Run from src/ with:
     python3 -m upordowntrader.record.run
-    python3 -m upordowntrader.record.run --seconds 120
+    python3 -m upordowntrader.record.run --seconds 120 --db /tmp/check.sqlite
 """
 
 import argparse
 import asyncio
 import signal
+import subprocess
 import time
 from dataclasses import replace
 from upordowntrader.api import bitstamp, bullish, coinbase, cryptocom, gemini, hyperliquid, kalshi, kraken
 from upordowntrader.common.log import log, on_failure
+from upordowntrader.common.paths import ROOT
 from upordowntrader.common.periodic import Periodic
 from upordowntrader.db import database
 from upordowntrader.record.marks import MarkRecorder
@@ -162,6 +164,18 @@ async def settle_hyperliquid(conn, log):
         log(f"hyperliquid {m.series} {m.ticker} settled {m.result} against a strike of {m.strike:,.6g}{worked_out}")
 
 
+def code_version():
+    """
+    The commit the process runs, with '-dirty' when files differ from it, or 'unknown' outside a git checkout, so the log
+    says what code recorded what follows it.
+    """
+    try:
+        return subprocess.run(["git", "describe", "--always", "--dirty"], cwd=ROOT, capture_output=True, text=True,
+                              timeout=5).stdout.strip() or "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
 def woke(streams, last_tick, now, log):
     """
     Whether the machine slept, or the process stalled, between two ticks. If so, store the stretch as a gap for each
@@ -211,7 +225,7 @@ async def record(conn, seconds=None, log=log):
     started = last_status = last_tick = time.time()
     window = hl_window = None
     log(f"recording {SERIES}, {BOOK_LEVELS} levels a side, the quotes of {', '.join(QUOTE_STREAMS)}, and Hyperliquid's up or down "
-        f"windows on {', '.join(hyperliquid.UNDERLYINGS)}")
+        f"windows on {', '.join(hyperliquid.UNDERLYINGS)}, with code {code_version()}")
     try:
         while seconds is None or time.time() - started < seconds:
             await asyncio.sleep(1)
@@ -244,12 +258,13 @@ async def record(conn, seconds=None, log=log):
             log(writer.status())
 
 
-async def until_stopped(seconds):
+async def until_stopped(seconds, db_path=None):
     """
-    Record, stopping on a kill as on Ctrl-C, by cancelling, so what is waiting is written first either way.
+    Record into the database at db_path, by default database.DB_PATH, stopping on a kill as on Ctrl-C, by cancelling, so
+    what is waiting is written first either way.
     """
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
-    await record(database.connect(), seconds)
+    await record(database.connect(db_path), seconds)
 
 
 # MAIN
@@ -257,11 +272,12 @@ async def until_stopped(seconds):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Record Kalshi's Bitcoin 15 minute windows' order books into SQLite.")
     ap.add_argument("--seconds", type=float, help="stop after this long, by default run until stopped")
+    ap.add_argument("--db", help="the database to record into, by default data/history.sqlite, another for a trial run")
     args = ap.parse_args()
     missing = [path for path in (kalshi.KEY_ID_FILE, kalshi.PRIVATE_KEY_FILE) if not path.exists()]
     if missing:
         raise SystemExit(f"The Kalshi API key is missing: {', '.join(str(p) for p in missing)}. Copy SportsArb's key files there.")
     try:
-        asyncio.run(until_stopped(args.seconds))
+        asyncio.run(until_stopped(args.seconds, args.db))
     except (KeyboardInterrupt, asyncio.CancelledError):
         log("stopped")

@@ -1,0 +1,21 @@
+# The recorder as a systemd service on the AWS instance, installed by deploy/setup.sh. Runs as ubuntu from the repo's src/,
+# starts on boot, restarts on any exit, and appends what it prints to data/logs/record-kalshi.log, as the runs on the Mac
+# did. A stop sends SIGTERM, on which the recorder writes what is waiting and logs "stopped".
+
+[Unit]
+Description=CryptoUpOrDownTrader recorder: Kalshi's and Hyperliquid's BTC up or down windows, and the exchanges' quotes
+Wants=network-online.target
+After=network-online.target time-sync.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/CryptoUpOrDownTrader/src
+ExecStart=/usr/bin/python3 -m upordowntrader.record.run
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=append:/home/ubuntu/CryptoUpOrDownTrader/data/logs/record-kalshi.log
+StandardError=append:/home/ubuntu/CryptoUpOrDownTrader/data/logs/record-kalshi.log
+
+[Install]
+WantedBy=multi-user.target
