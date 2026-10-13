@@ -59,7 +59,8 @@ FAIR_PRICES = ("model", "recalibrated", "blend")
 THRESHOLD = 0.05        # Edge after the fee, in dollars a contract, an order needs.
 LATENCY = 0.1           # Seconds from the change that opens an edge to the order reaching Kalshi.
 QUOTE_DELAY = 0.05      # Seconds from an exchange's time for a quote to a trader near it having it.
-STAMPED = ("coinbase", "bitstamp", "gemini", "bullish", "cryptocom")  # Exchanges whose stamp on a quote is its time, see quote_feed().
+STAMPED = ("coinbase", "bitstamp", "gemini", "bullish", "cryptocom", "hyperliquid", "binance perp", "bybit perp", "okx perp", "deribit perp",
+           "coinbase perp")     # Sources whose stamp on a quote is its time, see quote_feed(): all but Kraken.
 HISTORY_DAYS = benchmark.HISTORY_DAYS   # Days of Coinbase's minutes read before the first window, for the variance forecast.
 
 
