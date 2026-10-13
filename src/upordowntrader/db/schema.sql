@@ -107,3 +107,29 @@ CREATE TABLE IF NOT EXISTS minutes (
     volume  REAL,               -- Contracts traded in the minute.
     PRIMARY KEY (venue, ticker, time)
 ) WITHOUT ROWID;
+
+-- The paper trader's orders, see paper/trader.py: what it would have sent and why, what the venue's book filled when the
+-- order would have reached it, and, once the window settled, what that made. Times in seconds since 1970.
+CREATE TABLE IF NOT EXISTS paper_orders (
+    venue        TEXT NOT NULL,      -- 'kalshi' or 'polymarket_us'.
+    ticker       TEXT NOT NULL,      -- The venue's market.
+    close_time   INTEGER NOT NULL,   -- When the window closes, which the venues' markets of a window share.
+    decided      REAL NOT NULL,      -- When the order was decided, by our clock.
+    side         TEXT NOT NULL,      -- 'yes' or 'no'.
+    price        REAL NOT NULL,      -- Bitcoin's price the model read, the exchanges' average moved onto BRTI's level.
+    model        REAL NOT NULL,      -- The model's chance of Up, recalibrated.
+    mid          REAL NOT NULL,      -- Kalshi's mid then, an empty side counted as a bid of 0 or an ask of 1.
+    fair         REAL NOT NULL,      -- The fair price of Up traded on, the model blended with Kalshi's mid.
+    edge         REAL NOT NULL,      -- The best price's edge after the venue's taker fee, in dollars a contract.
+    limit_price  REAL NOT NULL,      -- The worst price, on the side bought, whose edge reached the threshold.
+    offered      REAL NOT NULL,      -- Contracts at the limit or better as decided, less what earlier orders took.
+    arrived      REAL NOT NULL,      -- When the order would have reached the venue, by the venue's clock.
+    contracts    REAL NOT NULL,      -- Contracts the venue's book then filled, up to the order's size.
+    cost         REAL,               -- Their average price, null when none filled.
+    best         REAL,               -- The best price filled, for what one contract an order would make. Null when none filled.
+    fees         REAL NOT NULL,      -- The taker fees on them, in dollars.
+    expected     REAL NOT NULL,      -- The fair price's edge after the fee on the contracts filled, in dollars.
+    result       TEXT,               -- 'yes' or 'no' once the venue settled the window, null until.
+    profit       REAL,               -- What the contracts filled made after the fees, in dollars, once settled.
+    PRIMARY KEY (venue, ticker, decided, side)
+);

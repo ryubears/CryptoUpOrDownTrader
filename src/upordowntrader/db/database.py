@@ -11,6 +11,8 @@ One database file holds every table:
     books    a recorded market's book at each best price move, and once a second besides, by record/recorder.py
     gaps     stretches when a venue's feed was down, by record/recorder.py and record/quotes.py
     quotes   each exchange's best bid and ask at each price move, and once a second besides, by record/quotes.py
+    marks    a venue's perps' marks, which some of its windows settle on, by record/marks.py
+    paper_orders  the paper trader's orders, by paper/trader.py, settled by paper/run.py
 
 The tables themselves are in schema.sql. This file holds the reads and writes.
 """
@@ -190,3 +192,45 @@ def insert_gap(conn, gap):
     """
     with conn:
         conn.execute("INSERT OR REPLACE INTO gaps (venue, start_time, end_time) VALUES (:venue, :start_time, :end_time)", asdict(gap))
+
+
+# PAPER ORDERS
+
+PAPER_COLUMNS = ("venue", "ticker", "close_time", "decided", "side", "price", "model", "mid", "fair", "edge", "limit_price", "offered",
+                 "arrived", "contracts", "cost", "best", "fees", "expected", "result", "profit")
+
+
+def store_paper_order(conn, order):
+    """
+    Store a paper order, a dict with the paper_orders columns but result and profit, which settle_paper_orders() sets.
+    """
+    names = [n for n in PAPER_COLUMNS if n not in ("result", "profit")]
+    with conn:
+        conn.execute(f"INSERT OR REPLACE INTO paper_orders ({', '.join(names)}) VALUES ({', '.join(':' + n for n in names)})", order)
+
+
+def unsettled_paper_markets(conn, now):
+    """
+    The (venue, ticker) of each market with paper orders not settled yet, closed by now, in seconds since 1970.
+    """
+    return conn.execute("SELECT DISTINCT venue, ticker FROM paper_orders WHERE result IS NULL AND close_time <= ? ORDER BY venue, ticker",
+                        (now,)).fetchall()
+
+
+def settle_paper_orders(conn, venue, ticker, result):
+    """
+    Settle a market's paper orders as the window went, 'yes' or 'no': each one's contracts pay a dollar when its side won,
+    less what they cost and their fees. Returns how many orders were settled.
+    """
+    with conn:
+        return conn.execute("UPDATE paper_orders SET result = :result, profit = contracts * (side = :result) - contracts * COALESCE(cost, 0) - fees "
+                            "WHERE venue = :venue AND ticker = :ticker AND result IS NULL",
+                            {"venue": venue, "ticker": ticker, "result": result}).rowcount
+
+
+def load_paper_orders(conn):
+    """
+    Every paper order as a dict of the paper_orders columns, oldest first.
+    """
+    rows = conn.execute(f"SELECT {', '.join(PAPER_COLUMNS)} FROM paper_orders ORDER BY decided").fetchall()
+    return [dict(zip(PAPER_COLUMNS, row, strict=True)) for row in rows]

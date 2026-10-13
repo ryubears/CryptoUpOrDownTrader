@@ -140,17 +140,19 @@ def window_chances(feed, variance, start, market, t, fit=None, tracking=0.0):
     return fair.chance(z, seconds_left, fit)
 
 
-def settlement_error(feed, market):
+def settlement_error(feed, market, close_feed=None):
     """
     The log of the stand-in's settlement over a window's own: the average of the price known at its 60 readings, moved
-    onto BRTI's level by the gap at the open as window_chances() moves it. NaN unless the window has settled and the price
-    was known at every reading.
+    onto BRTI's level by the gap at the open as window_chances() moves it. The close is read from close_feed when one is
+    given, as a Feed of the minutes around the open and the close alone would read a quote from the open where the close
+    has none. NaN unless the window has settled and the price was known at every reading.
     """
     if market.settlement is None:
         return np.nan
     readings = np.arange(1, 61) - 60
     offset = np.mean(price_at(feed, market.open_time + readings)) - market.strike
-    return float(np.log((np.mean(price_at(feed, market.close_time + readings)) - offset) / market.settlement))
+    closing = price_at(close_feed or feed, market.close_time + readings)
+    return float(np.log((np.mean(closing) - offset) / market.settlement))
 
 
 # BOOKS

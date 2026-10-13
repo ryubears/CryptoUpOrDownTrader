@@ -5,7 +5,7 @@ Tests for the recording process, with stand ins for Kalshi's market reads and st
 import asyncio
 import time
 from dataclasses import replace
-from upordowntrader.api import hyperliquid, kalshi
+from upordowntrader.api import hyperliquid, kalshi, polymarket_us
 from upordowntrader.db import database
 from upordowntrader.db.models import Market
 from upordowntrader.record import run
@@ -109,6 +109,44 @@ def test_settling_reads_only_closed_windows_and_keeps_the_strike(tmp_path, monke
     assert len(asked) == 1                                               # Nothing left to settle.
 
 
+def polymarket_window(close_time, strike=None, settlement=None, result=None):
+    """
+    A Market for one of Polymarket US's windows, closing at close_time.
+    """
+    name = polymarket_us.slug(int(close_time) - 900)
+    return Market("polymarket_us", name, name, polymarket_us.SERIES, int(close_time) - 900, int(close_time), strike, settlement, result,
+                  None)
+
+
+def test_a_polymarket_refresh_stores_the_windows_and_streams_only_those_not_closed(tmp_path, monkeypatch):
+    close = (int(time.time()) // 900 + 1) * 900
+    found = [polymarket_window(close - 900, 80000.0), polymarket_window(close, 80010.0), polymarket_window(close + 900)]
+    asked = []
+    monkeypatch.setattr(polymarket_us, "windows", lambda start, end: asked.append((start, end)) or found)
+    conn = database.connect(tmp_path / "history.sqlite")
+    stream = FakeStream([found[0].ticker], None)
+    recorder = Recorder(conn, "polymarket_us")
+    recorder.on_book(found[0].ticker, [[0.9, 1.0]], [[0.95, 1.0]])
+    asyncio.run(run.refresh_polymarket(conn, stream, recorder))
+    assert stream.wanted == {found[1].ticker, found[2].ticker} and recorder.books == {}
+    assert [m.ticker for m in database.load_markets(conn, "polymarket_us")] == [m.ticker for m in found]
+    assert round(asked[0][1] - asked[0][0]) == run.WINDOW_SECONDS + run.LOOKAHEAD_SECONDS
+
+
+def test_polymarket_settles_the_closed_windows_lately_closed_and_keeps_the_strike(tmp_path, monkeypatch):
+    close = (int(time.time()) // 900) * 900
+    conn = database.connect(tmp_path / "history.sqlite")
+    windows = [polymarket_window(close - run.SETTLE_REACH - 900, 79000.0), polymarket_window(close, 80000.0), polymarket_window(close + 900)]
+    database.upsert_markets(conn, windows)
+    asked, logs = [], []
+    monkeypatch.setattr(polymarket_us, "window", lambda name: asked.append(name) or polymarket_window(close, None, 79990.5, "no"))
+    asyncio.run(run.settle_polymarket(conn, logs.append))
+    assert asked == [windows[1].ticker]                                 # Not the one too long closed, nor the one trading.
+    settled = database.load_markets(conn, "polymarket_us")[1]
+    assert (settled.strike, settled.settlement, settled.result) == (80000.0, 79990.5, "no")
+    assert logs == [f"polymarket_us {windows[1].ticker} settled no, 79,990.50 against a strike of 80,000.00"]
+
+
 def hyperliquid_window(ticker, close_time, series="out-BTC-15m", strike=83984.0):
     """
     A Market for one of Hyperliquid's windows, closing at close_time.
@@ -165,6 +203,9 @@ def test_a_short_run_records_the_open_windows_books_and_the_exchanges_quotes(tmp
     now = time.time()
     monkeypatch.setattr(kalshi, "KalshiBookStream", FakeStream)
     monkeypatch.setattr(hyperliquid, "HyperliquidBookStream", FakeStream)
+    monkeypatch.setattr(polymarket_us, "PolymarketUSBookStream", FakeStream)
+    monkeypatch.setattr(polymarket_us, "has_key", lambda: True)
+    monkeypatch.setattr(polymarket_us, "windows", lambda start, end: [polymarket_window(now + 870, 80010.0)])
     monkeypatch.setattr(run, "QUOTE_STREAMS", {"coinbase": (FakeStream, "BTC-USD"), "kraken": (FakeStream, "BTC/USD")})
     monkeypatch.setattr(kalshi, "windows", lambda series, start, end: [window("KXBTC15M-B-15", now + 870, 80010.0)])
     monkeypatch.setattr(kalshi, "markets", lambda tickers: [])
@@ -174,9 +215,23 @@ def test_a_short_run_records_the_open_windows_books_and_the_exchanges_quotes(tmp
     logs = []
     asyncio.run(run.record(conn, seconds=2.5, log=logs.append))
     tickers = {row[0] for row in conn.execute("SELECT ticker FROM books")} - set(hyperliquid.UNDERLYINGS)    # The fake sends the perps books.
-    assert tickers == {"KXBTC15M-B-15", "#113760"} and conn.execute("SELECT COUNT(*) FROM books WHERE venue = 'kalshi'").fetchone()[0] >= 5
+    assert tickers == {"KXBTC15M-B-15", polymarket_window(now + 870).ticker, "#113760"}
+    assert conn.execute("SELECT COUNT(*) FROM books WHERE venue = 'kalshi'").fetchone()[0] >= 5
     quotes = conn.execute("SELECT source, COUNT(*), MIN(bid), MAX(ask) FROM quotes GROUP BY source").fetchall()
     assert [q[0] for q in quotes] == ["coinbase", "kraken"] and all(q[1] >= 1 and q[2] < q[3] for q in quotes)
-    assert logs[0] == ("recording KXBTC15M, 5 levels a side, the quotes of coinbase, kraken, and Hyperliquid's up or down windows on BTC, "
-                       "with code 6132fc7-dirty")
-    assert [line.split()[0] for line in logs[-4:]] == ["kalshi", "coinbase", "hyperliquid", "hyperliquid"]
+    assert logs[0] == ("recording KXBTC15M and Polymarket US's 15 minute windows, 5 levels a side, the quotes of coinbase, kraken, and "
+                       "Hyperliquid's up or down windows on BTC, with code 6132fc7-dirty")
+    assert [line.split()[0] for line in logs[-5:]] == ["kalshi", "coinbase", "polymarket_us", "hyperliquid", "hyperliquid"]
+
+
+def test_without_a_polymarket_key_its_windows_are_left_out(tmp_path, monkeypatch):
+    monkeypatch.setattr(kalshi, "KalshiBookStream", FakeStream)
+    monkeypatch.setattr(hyperliquid, "HyperliquidBookStream", FakeStream)
+    monkeypatch.setattr(run, "QUOTE_STREAMS", {"coinbase": (FakeStream, "BTC-USD")})
+    monkeypatch.setattr(kalshi, "windows", lambda series, start, end: [])
+    monkeypatch.setattr(hyperliquid, "windows", lambda: [])
+    monkeypatch.setattr(polymarket_us, "has_key", lambda: False)
+    monkeypatch.setattr(run, "code_version", lambda: "6132fc7")
+    logs = []
+    asyncio.run(run.record(database.connect(tmp_path / "history.sqlite"), seconds=1.5, log=logs.append))
+    assert logs[0].startswith("no Polymarket US API key in ") and logs[1].startswith("recording KXBTC15M, 5 levels a side")

@@ -1,0 +1,23 @@
+# The paper trader as a systemd service on the AWS instance, beside the recorder, installed by deploy/setup.sh. Runs as
+# ubuntu from the repo's src/, starts on boot, restarts on any exit, and appends what it prints to data/logs/paper.log. It
+# runs at a lower priority than the recorder, so its daily fit, a minute of work, never delays a recorded book. A stop
+# sends SIGTERM, on which it logs "stopped".
+
+[Unit]
+Description=CryptoUpOrDownTrader paper trader: pretend orders on Kalshi's and Polymarket US's BTC 15 minute windows
+Wants=network-online.target
+After=network-online.target time-sync.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/CryptoUpOrDownTrader/src
+ExecStart=/usr/bin/python3 -m upordowntrader.paper.run
+Nice=10
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=append:/home/ubuntu/CryptoUpOrDownTrader/data/logs/paper.log
+StandardError=append:/home/ubuntu/CryptoUpOrDownTrader/data/logs/paper.log
+
+[Install]
+WantedBy=multi-user.target

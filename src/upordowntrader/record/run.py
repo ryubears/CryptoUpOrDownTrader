@@ -1,8 +1,8 @@
 """
 Record Kalshi's Bitcoin 15 minute windows: their order books as they change, and how each one settled, and beside them
 the best bid and ask of Coinbase, Kraken, Bitstamp, Gemini, Bullish, and Crypto.com, six of the seven exchanges BRTI is
-built from, and of Hyperliquid's BTC perp, as they move. And the same of Hyperliquid's up or down windows on BTC, with
-the perp's mark, which they settle on.
+built from, and of bitcoin perpetuals, as they move. And the same of Polymarket US's 15 minute windows, the same bet as
+Kalshi's, and of Hyperliquid's up or down windows on BTC, with the perp's mark, which they settle on.
 
 A window's market is listed a day ahead and trades only during its 15
 minutes. Just after each quarter hour, and every REFRESH_SECONDS besides,
@@ -25,6 +25,10 @@ and the windows are read again, back to before the sleep, so even those that
 opened and closed while it slept are stored with their strike and
 settlement. Their books are lost.
 
+Polymarket US's windows, see api/polymarket_us.py, are read and streamed as Kalshi's are, and settled from its gateway
+every SETTLE_SECONDS, under the venue 'polymarket_us'. Its stream needs its API key in data/, and without one its windows
+are left out.
+
 Hyperliquid's windows, see api/hyperliquid.py, are read every REFRESH_SECONDS and HYPERLIQUID_DELAY after each quarter
 hour, once the 15 minute series has listed its next, and their books recorded as Kalshi's are, under the venue
 'hyperliquid', on a connection that also carries the perps' marks, stored by record/marks.py. Every SETTLE_SECONDS the
@@ -46,7 +50,21 @@ import signal
 import subprocess
 import time
 from dataclasses import replace
-from upordowntrader.api import binance, bitstamp, bullish, bybit, coinbase, cryptocom, deribit, gemini, hyperliquid, kalshi, kraken, okx
+from upordowntrader.api import (
+    binance,
+    bitstamp,
+    bullish,
+    bybit,
+    coinbase,
+    cryptocom,
+    deribit,
+    gemini,
+    hyperliquid,
+    kalshi,
+    kraken,
+    okx,
+    polymarket_us,
+)
 from upordowntrader.common.log import log, on_failure
 from upordowntrader.common.paths import ROOT
 from upordowntrader.common.periodic import Periodic
@@ -65,8 +83,8 @@ STATUS_SECONDS = 60
 SLEEP_SECONDS = 10          # A tick this long after the last means the machine slept, or the process stalled.
 HYPERLIQUID_DELAY = 30      # Seconds after a quarter hour before Hyperliquid's windows are read: its 15 minute series lists
                             # the next window 15 to 25 seconds after.
-SETTLE_REACH = 6 * 3600     # Seconds after its close a Hyperliquid window is still looked for in the explorer, which keeps
-                            # about 12 hours of the 15 minute series' settlements.
+SETTLE_REACH = 6 * 3600     # Seconds after its close a Hyperliquid or Polymarket US window is still looked for: Hyperliquid's
+                            # explorer keeps about 12 hours of the 15 minute series' settlements.
 MARK_REACH = 30             # Seconds around a daily window's close its settlement reads marks from.
 # Each exchange whose best bid and ask are recorded, with its quote stream and its name for bitcoin in dollars. The first
 # six are among the exchanges BRTI is built from, as CF Benchmarks listed them on 2026-08-24; LMAX Digital, the other, has
@@ -110,6 +128,35 @@ async def settle(conn, log):
     for m in database.load_markets(conn, "kalshi"):     # As stored, so with the strike read as the window opened.
         if m.ticker in tickers and m.result and m.settlement is not None and m.strike is not None:
             log(f"kalshi {m.ticker} settled {m.result}, {m.settlement:,.2f} against a strike of {m.strike:,.2f}")
+
+
+async def refresh_polymarket(conn, stream, recorder):
+    """
+    Store Polymarket US's windows closing from a window ago to LOOKAHEAD_SECONDS ahead, and stream the books of those not
+    yet closed. The books of those closed are dropped from the stream and the recorder both.
+    """
+    now = time.time()
+    found = await asyncio.to_thread(polymarket_us.windows, now - WINDOW_SECONDS, now + LOOKAHEAD_SECONDS)
+    database.upsert_markets(conn, found)
+    trading = {m.ticker for m in found if m.close_time > now}
+    closed = stream.wanted - trading
+    stream.add(trading)
+    stream.remove(closed)
+    recorder.forget(closed)
+
+
+async def settle_polymarket(conn, log):
+    """
+    Read how Polymarket US's windows closed by now, within SETTLE_REACH, and not settled yet went, store it, and log each
+    one settled.
+    """
+    now = time.time()
+    closed = [m.ticker for m in database.load_markets(conn, "polymarket_us") if m.result is None and now - SETTLE_REACH < m.close_time <= now]
+    found = [m for m in await asyncio.to_thread(lambda: [polymarket_us.window(name) for name in closed]) if m is not None]
+    database.upsert_markets(conn, found)
+    for m in database.load_markets(conn, "polymarket_us"):      # As stored, so with the strike read as the window opened.
+        if m.ticker in closed and m.result and m.settlement is not None and m.strike is not None:
+            log(f"polymarket_us {m.ticker} settled {m.result}, {m.settlement:,.2f} against a strike of {m.strike:,.2f}")
 
 
 async def refresh_hyperliquid(conn, stream, recorder):
@@ -213,23 +260,34 @@ async def record(conn, seconds=None, log=log):
     stream = kalshi.KalshiBookStream([], recorder.on_book, recorder.on_gap, log)
     stream.depth = BOOK_LEVELS
     stream.on_state = recorder.on_state
+    pm_recorder = Recorder(conn, "polymarket_us", log)
+    pm_stream = polymarket_us.PolymarketUSBookStream([], pm_recorder.on_book, pm_recorder.on_gap, log) if polymarket_us.has_key() else None
+    if pm_stream:
+        pm_stream.depth = BOOK_LEVELS
+        pm_stream.on_state = pm_recorder.on_state
+    else:
+        log(f"no Polymarket US API key in {polymarket_us.KEY_ID_FILE.parent}, so its windows are not recorded")
     hl_recorder = Recorder(conn, "hyperliquid", log)
     marks = MarkRecorder(conn, "hyperliquid", log)
     hl_stream = hyperliquid.HyperliquidBookStream(hyperliquid.UNDERLYINGS, hl_recorder.on_book, hl_recorder.on_gap, log)
     hl_stream.depth = BOOK_LEVELS
     hl_stream.on_mark = marks.on_mark
-    streams = [stream, hl_stream, *(quote_stream(source, quotes, log) for source in QUOTE_STREAMS)]
+    streams = [stream, *([pm_stream] if pm_stream else []), hl_stream, *(quote_stream(source, quotes, log) for source in QUOTE_STREAMS)]
+    writers = (recorder, quotes, *([pm_recorder] if pm_stream else []), hl_recorder, marks)
     feeds = [asyncio.create_task(s.run()) for s in streams]
     for s, feed in zip(streams, feeds, strict=True):
         feed.add_done_callback(on_failure(log, f"the {s.name} stream"))
     refresher = Periodic(REFRESH_SECONDS, log, "reading the windows")
     settler = Periodic(SETTLE_SECONDS, log, "reading the settlements")
+    pm_refresher = Periodic(REFRESH_SECONDS, log, "reading Polymarket US's windows")
+    pm_settler = Periodic(SETTLE_SECONDS, log, "reading Polymarket US's settlements")
     hl_refresher = Periodic(REFRESH_SECONDS, log, "reading Hyperliquid's windows")
     hl_settler = Periodic(SETTLE_SECONDS, log, "reading Hyperliquid's settlements")
     reads = {}
     started = last_status = last_tick = time.time()
     window = hl_window = None
-    log(f"recording {SERIES}, {BOOK_LEVELS} levels a side, the quotes of {', '.join(QUOTE_STREAMS)}, and Hyperliquid's up or down "
+    windows = f"{SERIES} and Polymarket US's 15 minute windows" if pm_stream else SERIES
+    log(f"recording {windows}, {BOOK_LEVELS} levels a side, the quotes of {', '.join(QUOTE_STREAMS)}, and Hyperliquid's up or down "
         f"windows on {', '.join(hyperliquid.UNDERLYINGS)}, with code {code_version()}")
     try:
         while seconds is None or time.time() - started < seconds:
@@ -237,28 +295,33 @@ async def record(conn, seconds=None, log=log):
             now = time.time()
             if woke(streams, last_tick, now, log):
                 refresher.again()
+                pm_refresher.again()
                 hl_refresher.again()
             last_tick = now
             if int((now - OPEN_DELAY) // WINDOW_SECONDS) != window:      # A window opened, so read it and the next at once.
                 window = int((now - OPEN_DELAY) // WINDOW_SECONDS)
                 refresher.again()
+                pm_refresher.again()
             if int((now - HYPERLIQUID_DELAY) // WINDOW_SECONDS) != hl_window:     # Hyperliquid has listed its next window.
                 hl_window = int((now - HYPERLIQUID_DELAY) // WINDOW_SECONDS)
                 hl_refresher.again()
             refresher.tick(now, lambda: refresh(conn, stream, recorder, reads))
             settler.tick(now, lambda: settle(conn, log))
+            if pm_stream:
+                pm_refresher.tick(now, lambda: refresh_polymarket(conn, pm_stream, pm_recorder))
+                pm_settler.tick(now, lambda: settle_polymarket(conn, log))
             hl_refresher.tick(now, lambda: refresh_hyperliquid(conn, hl_stream, hl_recorder))
             hl_settler.tick(now, lambda: settle_hyperliquid(conn, log))
-            for writer in (recorder, quotes, hl_recorder, marks):
+            for writer in writers:
                 writer.flush()
             if now - last_status >= STATUS_SECONDS:
-                for writer in (recorder, quotes, hl_recorder, marks):
+                for writer in writers:
                     log(writer.status())
                 last_status = now
     finally:
         for feed in feeds:
             feed.cancel()
-        for writer in (recorder, quotes, hl_recorder, marks):
+        for writer in writers:
             writer.flush()
             log(writer.status())
 

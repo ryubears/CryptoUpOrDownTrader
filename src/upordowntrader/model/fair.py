@@ -18,7 +18,8 @@ Two corrections are fitted on Kalshi's settled windows, at each whole minute lef
 A fit holds one value for each whole minute left, 1 to MINUTES. A moment between marks takes the next mark's, and a
 moment inside the averaging minute the last one's, 1 minute left.
 
-A fair price's edge on a contract is what it is worth by that price less what it costs, with Kalshi's taker fee.
+A fair price's edge on a contract is what it is worth by that price less what it costs, with Kalshi's taker fee, or
+another venue's at its own rate.
 """
 
 import numpy as np
@@ -115,18 +116,18 @@ def blended(market, p, seconds_left, fit):
     return 1 / (1 + np.exp(-np.clip(b[..., 0] + b[..., 1] * log_odds(market) + b[..., 2] * log_odds(p), -30, 30)))
 
 
-def fee(price):
+def fee(price, rate=FEE_RATE):
     """
-    Kalshi's taker fee a contract at a price.
+    Kalshi's taker fee a contract at a price, or a venue's whose fee is rate * price * (1 - price) too.
     """
-    return FEE_RATE * price * (1 - price)
+    return rate * price * (1 - price)
 
 
-def edge(chance, price):
+def edge(chance, price, rate=FEE_RATE):
     """
-    The edge after the fee on a contract bought at price, given the chance it pays.
+    The edge after the fee on a contract bought at price, given the chance it pays, with the fee's rate, Kalshi's by default.
     """
-    return chance - price - fee(price)
+    return chance - price - fee(price, rate)
 
 
 # FITTING
