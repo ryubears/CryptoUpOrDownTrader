@@ -133,3 +133,40 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     profit       REAL,               -- What the contracts filled made after the fees, in dollars, once settled.
     PRIMARY KEY (venue, ticker, decided, side)
 );
+
+-- Each stretch where buying one side of a window's market on a venue had a positive edge after the venue's taker fee, by
+-- the fair price the paper trader trades on, one row as the stretch ends, as PredictionArbitrageTrader records its
+-- opportunities, see paper/trader.py. Profits are expected ones, the fair price's edge, not locked in as an arbitrage's.
+-- Times in seconds since 1970 by our clock, dollars a contract or in all as said.
+CREATE TABLE IF NOT EXISTS opportunities (
+    venue             TEXT NOT NULL,      -- 'kalshi' or 'polymarket_us'.
+    ticker            TEXT NOT NULL,      -- The venue's market.
+    close_time        INTEGER NOT NULL,   -- When the window closes, which the venues' markets of a window share.
+    side              TEXT NOT NULL,      -- 'yes' or 'no'.
+    start_time        REAL NOT NULL,      -- When the edge went positive.
+    end_time          REAL NOT NULL,      -- When it went back to zero or less, or the window could no longer be priced.
+    seconds           REAL NOT NULL,
+    peak_time         REAL NOT NULL,
+    peak_edge         REAL NOT NULL,      -- The edge after the fee at the best price, in dollars a contract, at the peak.
+    peak_price        REAL NOT NULL,      -- The best price then, on the side bought.
+    peak_fair         REAL NOT NULL,      -- The fair price of the side then.
+    peak_size         REAL NOT NULL,      -- Contracts at a positive edge, walking the book's levels, at the peak.
+    peak_capital      REAL NOT NULL,      -- What they cost with the fees, in dollars.
+    peak_profit       REAL NOT NULL,      -- Their expected profit after the fees, in dollars.
+    book_changed      INTEGER NOT NULL,   -- 1 when the peak came with a change of the venue's own book, 0 when the fair price moved.
+    days_held         REAL NOT NULL,      -- From the peak until the window pays.
+    return_pct        REAL NOT NULL,      -- The peak's edge over what a contract ties up, its price and fee, as a percent.
+    annual_pct        REAL NOT NULL,      -- return_pct scaled to a year over days_held, without compounding.
+    min_edge          REAL NOT NULL,      -- The edge the paper trader needs, which the next columns measure at.
+    min_edge_seconds  REAL,               -- The longest unbroken stretch at min_edge or more, null without one.
+    min_edge_size     REAL,               -- Contracts at min_edge or more through all of that stretch.
+    min_edge_capital  REAL,               -- What they cost with the fees.
+    min_edge_profit   REAL,               -- Their expected profit, at the stretch's thinnest moment.
+    take_size         REAL,               -- Contracts one order could have had at min_edge or more, at the best moment, null
+                                          -- without one.
+    take_capital      REAL,               -- What they cost with the fees.
+    take_profit       REAL,               -- Their expected profit.
+    PRIMARY KEY (venue, ticker, side, start_time)
+);
+
+CREATE INDEX IF NOT EXISTS idx_opportunities_start ON opportunities (start_time);

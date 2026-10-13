@@ -4,16 +4,17 @@ streams of its own, so either can stop or change without the other.
 
 The process streams Kalshi's books of the window trading and the next, Polymarket US's of the same windows when its API
 key is in data/, and the best bid and ask of the exchanges BRTI is built from. It reads Kalshi's windows just after each
-quarter hour and every REFRESH_SECONDS, and every STRIKE_SECONDS while the window trading has no strike yet, and once a
-window opens reads its tracking variance from the recorded quotes, and, when the trader started after it opened, its
-offset, see trader.recorded_offset(). Every VARIANCE_SECONDS it reads Coinbase's minutes
-again for the variance forecast, and every FIT_SECONDS it downloads Kalshi's windows settled since, see
-history/markets.py, and fits the recalibration and the blend again on the TRAIN_DAYS before, see benchmark.fit_before().
-Nothing is traded until the first fit is made, a minute or two after the start. Every SETTLE_SECONDS it reads how the
-windows with paper orders settled, on each order's own venue, and stores what they made. A status line comes every
-STATUS_SECONDS. The work on the database outside the trader's own writes runs in threads on connections of their own.
+quarter hour and every REFRESH_SECONDS, and every STRIKE_SECONDS while the window trading has no strike yet. Once a window
+opens it reads the window's tracking variance from the recorded quotes, and, when the trader started after the window
+opened, its offset, see trader.recorded_offset(). Every VARIANCE_SECONDS it reads Coinbase's minutes again for the
+variance forecast, and every FIT_SECONDS it downloads Kalshi's windows settled since, see history/markets.py, and fits
+the recalibration and the blend again on the TRAIN_DAYS before, see benchmark.fit_before(). Nothing is traded until the
+first fit is made, a minute or two after the start. Every SETTLE_SECONDS it reads how the windows with paper orders
+settled, on each order's own venue, and stores what they made. The trader stores the opportunities it sees as they end,
+and those still open as the process stops. A status line comes every STATUS_SECONDS. The work on the database outside
+the trader's own writes runs in threads on connections of their own.
 
-It only decides and stores pretend orders, nothing is sent. See paper/report.py for what they made.
+It only decides and stores pretend orders, nothing is sent. See paper/report.py for what they made and the opportunities.
 
 Run from src/ with:
     python3 -m upordowntrader.paper.run
@@ -152,20 +153,24 @@ async def settle(conn, log):
 
 def status(conn, trader):
     """
-    One line on the window trading and what the paper orders made since midnight UTC.
+    One line on the window trading, what the paper orders made since midnight UTC, and the opportunities one order could
+    have taken at the threshold or more since then: how many, what that would have cost, and what it was expected to make.
     """
     now = time.time()
     midnight = now // 86400 * 86400
     orders, contracts, profit, unsettled = conn.execute(
         "SELECT COUNT(*), COALESCE(SUM(contracts), 0), COALESCE(SUM(profit), 0), SUM(result IS NULL) FROM paper_orders WHERE decided >= ?",
         (midnight,)).fetchone()
+    found, capital, expected = conn.execute("SELECT COUNT(*), COALESCE(SUM(take_capital), 0), COALESCE(SUM(take_profit), 0) "
+                                            "FROM opportunities WHERE start_time >= ? AND take_size > 0", (midnight,)).fetchone()
     w = trader.trading(now)
     line = "paper: no window priced"
     if w is not None:
         line = (f"paper: {w.market.ticker} {(w.market.close_time - now) / 60:.1f} min left, price {trader.stand_in() - w.offset:,.2f} "
                 f"against {w.market.strike:,.2f}")
     ready = "" if trader.fit is not None and trader.variance is not None else ", waiting for the fit and the variance forecast"
-    return f"{line}{ready}; today {orders} orders, {contracts:g} contracts, {profit:+.2f}$ settled, {unsettled or 0} orders to settle"
+    return (f"{line}{ready}; today {orders} orders, {contracts:g} contracts, {profit:+.2f}$ settled, {unsettled or 0} orders to settle; "
+            f"{found} opportunities at {100 * trader.threshold:.0f}c or more, {capital:,.0f}$ in one order each expecting {expected:+,.2f}$")
 
 
 # MAIN LOOP
@@ -225,6 +230,7 @@ async def trade(db_path=None, seconds=None, log=log):
     finally:
         for feed in feeds:
             feed.cancel()
+        trader.stop(time.time())
 
 
 async def until_stopped(seconds, db_path=None):

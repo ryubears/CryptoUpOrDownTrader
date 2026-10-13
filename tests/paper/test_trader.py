@@ -215,3 +215,58 @@ def test_the_tracking_variance_comes_from_the_stand_ins_errors_on_the_windows_se
     cache = {}
     assert paper.tracking_variance(conn, window, cache) == pytest.approx(np.mean(np.square(errors)))
     assert set(cache) == {f"T{k}" for k in range(10)} | {"QUIET"} and np.isnan(cache["QUIET"])
+
+
+def opportunities(t):
+    return database.load_opportunities(t.conn)
+
+
+def test_an_opportunity_keeps_its_peak_its_longest_stretch_at_the_threshold_and_what_one_order_could_have_had(tmp_path):
+    t, clock, _ = setup(tmp_path)
+    t.on_book("kalshi", "K", BIDS, ASKS, clock.now)
+    start = clock.now
+    quote(t, clock, 80_110.0)                                   # Yes at 52 and 54 cents reach the threshold, 95 is dear.
+    clock.now += 0.5
+    quote(t, clock, 80_100.0)                                   # Up a touch less likely, so the peak stays at the start,
+    t.on_book("kalshi", "K", BIDS, [[0.52, 10.0], *ASKS[1:]], clock.now)     # and 20 at 52 cents go.
+    clock.now += 1.5
+    end = clock.now
+    quote(t, clock, 80_050.0)                                   # Back at the strike: no edge.
+    t.tick(clock.now)
+    (o,) = opportunities(t)
+    assert (o["venue"], o["ticker"], o["side"], o["close_time"]) == ("kalshi", "K", "yes", CLOSE)
+    assert (o["start_time"], o["end_time"], o["seconds"], o["peak_time"], o["book_changed"]) == (start, end, 2.0, start, 0)
+    assert (o["peak_price"], o["peak_size"], o["min_edge"]) == (0.52, 50.0, paper.THRESHOLD)
+    fee = fair.fee(0.52)
+    assert o["peak_capital"] == pytest.approx(30 * (0.52 + fee) + 20 * (0.54 + fair.fee(0.54)))
+    assert o["peak_profit"] == pytest.approx(30 * o["peak_edge"] + 20 * fair.edge(o["peak_fair"], 0.54))
+    assert o["days_held"] == pytest.approx((CLOSE + paper.PAYOUT_SECONDS["kalshi"] - start) / 86400)
+    assert o["return_pct"] == pytest.approx(100 * o["peak_edge"] / (0.52 + fee))
+    assert o["annual_pct"] == pytest.approx(o["return_pct"] * 365 / o["days_held"])
+    assert (o["min_edge_seconds"], o["min_edge_size"], o["take_size"]) == (2.0, 30.0, 50.0)    # The fewest throughout, the best moment.
+    assert o["min_edge_capital"] == pytest.approx(10 * (0.52 + fee) + 20 * (0.54 + fair.fee(0.54)))
+    assert 0 < o["min_edge_profit"] < o["take_profit"] and o["take_capital"] == pytest.approx(o["peak_capital"])
+
+
+def test_an_edge_under_the_threshold_is_an_opportunity_without_a_take_and_ends_when_the_window_cannot_be_priced(tmp_path):
+    t, clock, _ = setup(tmp_path)
+    t.on_book("kalshi", "K", [[0.40, 10.0]], [[0.48, 40.0]], clock.now)    # At a chance of a half, Yes at 48 cents makes 0.25c.
+    assert not t.pending
+    step(t, clock, CLOSE - paper.MIN_LEFT)
+    (o,) = opportunities(t)
+    assert o["end_time"] == CLOSE - paper.MIN_LEFT and o["book_changed"] == 1     # The peak came with Kalshi's own book.
+    assert o["peak_size"] == 40.0 and o["peak_profit"] == pytest.approx(40 * o["peak_edge"]) and 0 < o["peak_edge"] < paper.THRESHOLD
+    assert (o["min_edge_seconds"], o["min_edge_size"], o["take_size"], o["take_profit"]) == (None, None, None, None)
+
+
+def test_the_open_opportunities_are_stored_as_the_trader_stops_and_a_halted_market_ends_its_own(tmp_path):
+    t, clock, _ = setup(tmp_path, venues=("kalshi", "polymarket_us"))
+    name = polymarket_us.slug(OPEN)
+    t.on_book("kalshi", "K", [[0.40, 10.0]], [[0.48, 40.0]], clock.now)
+    t.on_book("polymarket_us", name, [[0.40, 10.0]], [[0.48, 5.0]], clock.now)
+    clock.now += 1
+    t.on_state("polymarket_us", name, "suspended")
+    t.tick(clock.now)
+    assert [(o["venue"], o["end_time"]) for o in opportunities(t)] == [("polymarket_us", clock.now)]
+    t.stop(clock.now + 1)
+    assert sorted((o["venue"], o["end_time"]) for o in opportunities(t)) == [("kalshi", clock.now + 1), ("polymarket_us", clock.now)]

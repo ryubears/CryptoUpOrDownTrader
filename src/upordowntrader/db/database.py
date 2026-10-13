@@ -13,6 +13,7 @@ One database file holds every table:
     quotes   each exchange's best bid and ask at each price move, and once a second besides, by record/quotes.py
     marks    a venue's perps' marks, which some of its windows settle on, by record/marks.py
     paper_orders  the paper trader's orders, by paper/trader.py, settled by paper/run.py
+    opportunities  each stretch of positive edge the paper trader saw, by paper/trader.py
 
 The tables themselves are in schema.sql. This file holds the reads and writes.
 """
@@ -234,3 +235,29 @@ def load_paper_orders(conn):
     """
     rows = conn.execute(f"SELECT {', '.join(PAPER_COLUMNS)} FROM paper_orders ORDER BY decided").fetchall()
     return [dict(zip(PAPER_COLUMNS, row, strict=True)) for row in rows]
+
+
+# OPPORTUNITIES
+
+OPPORTUNITY_COLUMNS = ("venue", "ticker", "close_time", "side", "start_time", "end_time", "seconds", "peak_time", "peak_edge", "peak_price",
+                       "peak_fair", "peak_size", "peak_capital", "peak_profit", "book_changed", "days_held", "return_pct", "annual_pct",
+                       "min_edge", "min_edge_seconds", "min_edge_size", "min_edge_capital", "min_edge_profit", "take_size", "take_capital",
+                       "take_profit")
+
+
+def store_opportunities(conn, rows):
+    """
+    Store opportunities, each a dict with the opportunities columns, in one transaction.
+    """
+    with conn:
+        conn.executemany(f"INSERT OR REPLACE INTO opportunities ({', '.join(OPPORTUNITY_COLUMNS)}) "
+                         f"VALUES ({', '.join(':' + n for n in OPPORTUNITY_COLUMNS)})", rows)
+
+
+def load_opportunities(conn, since=0.0):
+    """
+    The opportunities starting from since, in seconds since 1970, as dicts of the opportunities columns, oldest first.
+    """
+    rows = conn.execute(f"SELECT {', '.join(OPPORTUNITY_COLUMNS)} FROM opportunities WHERE start_time >= ? ORDER BY start_time",
+                        (since,)).fetchall()
+    return [dict(zip(OPPORTUNITY_COLUMNS, row, strict=True)) for row in rows]

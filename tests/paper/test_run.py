@@ -99,3 +99,54 @@ def test_the_report_gives_each_venue_by_edge_time_left_and_day(tmp_path):
     assert "kalshi" in text and "polymarket_us" not in text
     for label in ("all", "edge 2-3c", "edge 3-5c", "edge 5c+", "5-10 min left", "1970-01-01"):
         assert any(line.strip().startswith(label) for line in lines), label
+
+
+def opportunity(venue="polymarket_us", start=1000.0, take=(100.0, 50.0, 2.0), lasted=0.5, book_changed=1, left=500.0, **more):
+    """
+    An opportunity as the trader stores it, one order at the threshold or more taking take, (contracts, capital, profit),
+    peaking left seconds before its window closes, or none with take None.
+    """
+    size, capital, profit = take or (None, None, None)
+    days = (left + 10) / 86400
+    return {"venue": venue, "ticker": "P", "close_time": int(start + left), "side": "yes", "start_time": start, "end_time": start + 1,
+            "seconds": 1.0, "peak_time": start, "peak_edge": 0.03, "peak_price": 0.5, "peak_fair": 0.55, "peak_size": 120.0, "peak_capital": 60.0,
+            "peak_profit": 2.2, "book_changed": book_changed, "days_held": days, "return_pct": 5.6, "annual_pct": 5.6 * 365 / days,
+            "min_edge": 0.02, "min_edge_seconds": lasted if take else None, "min_edge_size": 40.0 if take else None,
+            "min_edge_capital": 20.0 if take else None, "min_edge_profit": 0.8 if take else None, "take_size": size, "take_capital": capital,
+            "take_profit": profit, **more}
+
+
+def test_the_opportunities_report_gives_what_one_order_each_could_have_taken_and_how_long_the_edge_lasted(tmp_path):
+    conn = database.connect(tmp_path / "history.sqlite")
+    rows = [opportunity(start=1000.0), opportunity(start=2000.0, take=(10.0, 5.0, 0.5), lasted=2.0, book_changed=0, left=800.0),
+            opportunity(start=3000.0, take=None)]
+    database.store_opportunities(conn, rows)
+    assert [o["start_time"] for o in database.load_opportunities(conn, 1500.0)] == [2000.0, 3000.0]
+    lines = []
+    report.report_opportunities(database.load_opportunities(conn), "since the first", lines.append)
+    text = "\n".join(lines)
+    assert "3 opportunities at a positive edge after the fee, since the first, 2 reaching the threshold" in text
+    assert "polymarket_us opportunities (one order at 2c or more)" in text and "kalshi opportunities" not in text
+    assert "2 episodes could have taken 55$ in one order each, expecting 2.50$" in text
+    yearly = 100 * (2.0 * 365 / rows[0]["days_held"] + 0.5 * 365 / rows[1]["days_held"]) / 55
+    assert f"{100 * 2.5 / 55:,.1f}% on capital, {yearly:,.1f}% a year" in text
+    assert "at 2c or more for 2.000s at the median, 2.000s at the 90th percentile, 2.000s at the longest" in text
+    assert "80 contracts stayed, 40$ expecting 1.60$" in text and "own book change in 50%" in text
+    assert "2 of the stretches outlasted an order's trip to polymarket_us, 136 ms: through them 80 contracts stayed" in text
+    assert any(line.strip().startswith("10-15 min left") for line in lines) and any(line.strip().startswith("5-10 min left") for line in lines)
+
+
+def test_only_a_stretch_outlasting_an_orders_trip_counts_as_one_an_order_could_have_reached():
+    lines = []
+    report.report_opportunities([opportunity(lasted=0.05), opportunity(start=2000.0, lasted=0.5)], "since the first", lines.append)
+    assert "  1 of the stretches outlasted an order's trip to polymarket_us, 136 ms: through them 40 contracts stayed, 20$ expecting 0.80$" in lines
+
+
+def test_the_status_line_counts_the_opportunities_one_order_could_have_taken_today(tmp_path):
+    conn = database.connect(tmp_path / "history.sqlite")
+    now = time.time()
+    today = max(now - 10, now // 86400 * 86400)          # Since midnight UTC, whenever the test runs.
+    database.store_opportunities(conn, [opportunity(start=today), opportunity(start=today + 0.1, take=None),
+                                        opportunity(start=now - 2 * 86400)])
+    line = run.status(conn, PaperTrader(conn))
+    assert line.endswith("; 1 opportunities at 2c or more, 50$ in one order each expecting +2.00$")

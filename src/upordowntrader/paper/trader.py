@@ -20,6 +20,14 @@ the venue made later, which shows every change before has reached us, or FEED_SE
 last waits so. A paper order leaves the venue's book as it was, so the contracts it took are kept off later orders until
 the book shows fewer, as the replay does, see replay.still_resting().
 
+Beside the orders, the trader records every opportunity, as PredictionArbitrageTrader does: each stretch where buying one
+side of a venue's market had a positive edge after the fee, at the best price by the fair price, while the window could
+be priced, see Opportunity. Each says how long it lasted, its peak edge and the contracts at a positive edge then, walking
+the book's levels, what they cost with the fees and their expected profit, the return on that capital and its rate a
+year until the window pays, the longest unbroken stretch at the threshold or more and the contracts at it throughout, and
+what one order could have had at the threshold or more at the best moment. The books are the venues' own, without what
+paper orders took, and the profits expected ones, the fair price's edge, not locked in as an arbitrage's.
+
 The model reads, as each reaches us:
     price      the average of the newest mids of the exchanges BRTI is built from, see replay.EXCHANGES, those whose stream is
                up, moved onto BRTI's level at the window's open by the average gap between the two over the minute before it,
@@ -54,6 +62,10 @@ TAPE_SECONDS = 10           # Seconds of each book's changes kept, for the book 
 READING_SECONDS = 1800      # Seconds of the price's readings kept, back past the open of the window trading.
 CATCH_UP = 10               # The most seconds without a price a reading is filled back over. Longer, the process stalled.
 WINDOW_KEEP = 60            # Seconds after its close a window is forgotten, with its books.
+PAYOUT_SECONDS = {"kalshi": 5, "polymarket_us": 10}     # Seconds after its close a window pays: Kalshi settled one 3.7 s after on
+                                                        # 2026-10-10, and Polymarket US resolved one 10 s after on 2026-10-13.
+LOG_PROFIT_DOLLARS = 10     # Opportunities one order could have taken this much expected profit from are logged as they end.
+DAY = 86400
 
 
 @dataclass
@@ -65,6 +77,70 @@ class Window:
     names: dict                 # Each venue's market of the window, by venue.
     tracking: float | None = None   # The tracking variance, see tracking_variance(), None until read.
     offset: float | None = None     # The price over BRTI's level at the open, None until known, NaN when it cannot be.
+
+
+@dataclass
+class Opportunity:
+    """
+    A venue's market and side while its edge after the fee stays positive, followed moment by moment, see
+    PaperTrader.follow(), and stored as a row of the opportunities table as it ends, see row().
+    """
+    venue: str
+    ticker: str
+    close_time: int
+    side: str
+    start: float                    # When the edge went positive.
+    peak: dict                      # The best moment so far: its time, edge, price, fair price, the contracts at a positive
+                                    # edge, their capital and expected profit, and whether the venue's own book changed then.
+    take: tuple | None = None       # (contracts, capital, profit) one order could have had at the threshold or more at the best
+                                    # moment so far, or None before any.
+    since: float | None = None      # When the current stretch at the threshold or more began, or None outside one.
+    least: tuple = (0.0, 0.0, 0.0)  # The fewest contracts at the threshold or more so far in the stretch, as take.
+    longest: tuple | None = None    # The longest stretch so far, (seconds, contracts, capital, profit), or None before any.
+
+    def end_stretch(self, now):
+        """
+        Close the current stretch at the threshold or more at now, keeping it when it is the longest.
+        """
+        if self.since is None:
+            return
+        if self.longest is None or now - self.since > self.longest[0]:
+            self.longest = (now - self.since, *self.least)
+        self.since = None
+
+    def see(self, moment, at_threshold, now):
+        """
+        Follow one moment of the opportunity: moment as peak is, and at_threshold the (contracts, capital, profit) at the
+        threshold or more, or None when the best price's edge is under it.
+        """
+        if moment["edge"] > self.peak["edge"]:
+            self.peak = moment
+        if at_threshold is None:
+            self.end_stretch(now)
+            return
+        if self.since is None:
+            self.since, self.least = now, at_threshold
+        elif at_threshold[0] < self.least[0]:
+            self.least = at_threshold
+        if self.take is None or at_threshold[2] > self.take[2]:
+            self.take = at_threshold
+
+    def row(self, end, min_edge):
+        """
+        The opportunity as a row of the opportunities table, ended at end, measured at min_edge, the threshold.
+        """
+        self.end_stretch(end)
+        peak = self.peak
+        days = (self.close_time + PAYOUT_SECONDS[self.venue] - peak["time"]) / DAY
+        return_pct = 100 * peak["edge"] / (peak["price"] + fair.fee(peak["price"], FEE_RATES[self.venue]))
+        seconds, size, capital, profit = self.longest or (None, None, None, None)
+        take_size, take_capital, take_profit = self.take or (None, None, None)
+        return {"venue": self.venue, "ticker": self.ticker, "close_time": self.close_time, "side": self.side, "start_time": self.start,
+                "end_time": end, "seconds": end - self.start, "peak_time": peak["time"], "peak_edge": peak["edge"], "peak_price": peak["price"],
+                "peak_fair": peak["fair"], "peak_size": peak["size"], "peak_capital": peak["capital"], "peak_profit": peak["profit"],
+                "book_changed": int(peak["book_changed"]), "days_held": days, "return_pct": return_pct, "annual_pct": return_pct * 365 / days,
+                "min_edge": min_edge, "min_edge_seconds": seconds, "min_edge_size": size, "min_edge_capital": capital,
+                "min_edge_profit": profit, "take_size": take_size, "take_capital": take_capital, "take_profit": take_profit}
 
 
 # BOOKS
@@ -87,6 +163,20 @@ def book_mid(book):
     if not bids and not asks:
         return None
     return ((bids[0][0] if bids else 0.0) + (asks[0][0] if asks else 1.0)) / 2
+
+
+def depth(levels, chance, rate, least):
+    """
+    The contracts on levels, [price, contracts] best first, whose edge after the fee at rate is least or more, and more
+    than nothing, given the chance their side pays: how many, what they cost with the fees, and their expected profit.
+    """
+    size = capital = profit = 0.0
+    for p, c in levels:
+        e = fair.edge(chance, p, rate)
+        if e < least or e <= 0:
+            break
+        size, capital, profit = size + c, capital + c * (p + fair.fee(p, rate)), profit + c * e
+    return size, capital, profit
 
 
 def shown(levels, price, depth):
@@ -167,6 +257,8 @@ class PaperTrader:
         self.pending = []           # Orders decided and not filled yet.
         self.orders = 0             # Orders stored since the start.
         self.errors = {}            # Each settled Kalshi window's tracking error, by ticker, see tracking_variance().
+        self.opportunities = {}     # (venue, ticker, side) maps to its open Opportunity.
+        self.finished = []          # Rows of the opportunities ended since they were last stored.
 
     def up(self, name):
         """
@@ -223,7 +315,7 @@ class PaperTrader:
         while len(tape) > 1 and tape[1][0] <= now - TAPE_SECONDS:
             tape.popleft()
         self.lower_taken(venue, ticker, (bids, asks))
-        self.evaluate(now)
+        self.evaluate(now, key)
 
     def on_gap(self, venue, tickers):
         """
@@ -308,31 +400,100 @@ class PaperTrader:
         z = pricing.z_scores(price, 0.0, w.market.strike, left, max(forecast[i], fair.TINY), tracking=w.tracking)
         return float(fair.chance(z, left, self.fit))
 
-    # ORDERS
+    # PRICING
 
-    def evaluate(self, now):
+    def price(self, now):
         """
-        Fill the orders whose books are known, then price the window trading and decide the orders its edges call for.
+        The window trading and what its fair price was made from at now, {price, model, mid, fair}, or None when it cannot
+        be priced: no window with all it needs, no fit or variance forecast yet, MIN_LEFT or less left, or no Kalshi book.
         """
-        self.fill_due(now)
         w = self.trading(now)
         if w is None or self.fit is None or self.variance is None or w.market.close_time - now <= MIN_LEFT:
-            return
+            return None
         kalshi = self.books.get(("kalshi", w.names["kalshi"]))
         mid = book_mid(kalshi) if kalshi is not None and self.up("kalshi") else None
         if mid is None:
-            return
+            return None
         price = self.stand_in() - w.offset
         model = self.model_chance(w, price, now)
         if not math.isfinite(model):
+            return None
+        return w, {"price": price, "model": model, "mid": mid, "fair": float(fair.blended(mid, model, w.market.close_time - now, self.fit))}
+
+    def evaluate(self, now, changed=None):
+        """
+        Fill the orders whose books are known, then price the window trading, follow its opportunities, and decide the
+        orders its edges call for. changed is the (venue, ticker) whose book change brought the pricing, or None.
+        """
+        self.fill_due(now)
+        priced = self.price(now)
+        if priced is None:
+            self.end_opportunities(now)
             return
-        fair_up = float(fair.blended(mid, model, w.market.close_time - now, self.fit))
-        seen = {"price": price, "model": model, "mid": mid, "fair": fair_up}
+        w, seen = priced
         for venue, ticker in w.names.items():
             book = self.books.get((venue, ticker))
-            if book is not None and self.up(venue) and (venue, ticker) not in self.halted:
-                for side in ("yes", "no"):
-                    self.consider(now, w, venue, ticker, book, side, seen)
+            if book is None or not self.up(venue) or (venue, ticker) in self.halted:
+                self.end_opportunities(now, (venue, ticker))
+                continue
+            for side in ("yes", "no"):
+                self.follow(now, w, venue, ticker, book, side, seen["fair"] if side == "yes" else 1 - seen["fair"], changed == (venue, ticker))
+                self.consider(now, w, venue, ticker, book, side, seen)
+
+    # OPPORTUNITIES
+
+    def follow(self, now, w, venue, ticker, book, side, chance, changed):
+        """
+        Open, extend, or end the opportunity on one side of a venue's market, whose side pays with chance, from its book at
+        now. changed says whether the venue's own book change brought this pricing.
+        """
+        key = (venue, ticker, side)
+        rate = FEE_RATES[venue]
+        levels = side_levels(book, side)
+        edge = fair.edge(chance, levels[0][0], rate) if levels else -math.inf
+        if edge <= 0:
+            self.end_opportunity(key, now)
+            return
+        size, capital, profit = depth(levels, chance, rate, 0.0)
+        moment = {"time": now, "edge": edge, "price": levels[0][0], "fair": chance, "size": size, "capital": capital, "profit": profit,
+                  "book_changed": changed}
+        o = self.opportunities.get(key)
+        if o is None:
+            o = self.opportunities[key] = Opportunity(venue, ticker, w.market.close_time, side, now, moment)
+        o.see(moment, depth(levels, chance, rate, self.threshold) if edge >= self.threshold else None, now)
+
+    def end_opportunity(self, key, now):
+        """
+        End the open opportunity of a (venue, ticker, side), if any, at now: keep its row to store, and log it when one
+        order could have taken LOG_PROFIT_DOLLARS or more from it.
+        """
+        o = self.opportunities.pop(key, None)
+        if o is None:
+            return
+        row = o.row(now, self.threshold)
+        self.finished.append(row)
+        if (row["take_profit"] or 0) >= LOG_PROFIT_DOLLARS:
+            self.log(f"opportunity {o.venue} {o.side} {o.ticker}: {100 * row['peak_edge']:.1f}c x {row['peak_size']:,.0f} = "
+                     f"{row['peak_profit']:,.2f}$ expected, lasted {row['seconds']:.1f}s, {100 * self.threshold:.0f}c or more for "
+                     f"{row['min_edge_seconds']:.1f}s with {row['min_edge_size']:,.0f} contracts throughout; one order could have taken "
+                     f"{row['take_size']:,.0f} for {row['take_capital']:,.2f}$, expecting {row['take_profit']:,.2f}$")
+
+    def end_opportunities(self, now, market=None):
+        """
+        End every open opportunity at now, or those of one (venue, ticker).
+        """
+        for key in [k for k in self.opportunities if market is None or k[:2] == market]:
+            self.end_opportunity(key, now)
+
+    def store_opportunities(self):
+        """
+        Store the opportunities ended since they were last stored.
+        """
+        if self.finished:
+            database.store_opportunities(self.conn, self.finished)
+            self.finished = []
+
+    # ORDERS
 
     def consider(self, now, w, venue, ticker, book, side, seen):
         """
@@ -406,10 +567,12 @@ class PaperTrader:
 
     def tick(self, now):
         """
-        Once a second: store the readings, fill and decide as time alone moves the price, and forget what is past.
+        Once a second: store the readings, fill and decide as time alone moves the price, store the opportunities ended,
+        and forget what is past.
         """
         self.mark(now)
         self.evaluate(now)
+        self.store_opportunities()
         for s in [s for s in self.readings if s < now - READING_SECONDS]:
             del self.readings[s]
         for close in [c for c in self.windows if c < now - WINDOW_KEEP]:
@@ -418,3 +581,10 @@ class PaperTrader:
                 for key in [k for k in held if k[:2] in markets]:
                     del held[key]
             self.halted -= markets
+
+    def stop(self, now):
+        """
+        End every open opportunity at now and store them, as the process stops.
+        """
+        self.end_opportunities(now)
+        self.store_opportunities()
