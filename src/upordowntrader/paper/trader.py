@@ -12,7 +12,10 @@ before the last 5 minutes, whose moves the market sees coming and the model does
     edge        THRESHOLD a contract or more after the venue's taker fee at the best price, on either side, buying Yes below
                 the fair price or No above it, on Kalshi or Polymarket US, which trade the same bet
     episodes    once per venue and side until its edge falls below the threshold, as the replay takes them
-    size        an immediate or cancel limit for up to CONTRACTS contracts at the worst price whose edge reaches the threshold
+    size        an immediate or cancel limit for up to CONTRACTS contracts at the worst price whose edge reaches the threshold,
+                and from 2026-10-14 no more than WINDOW_CONTRACTS contracts of a window on a venue, both sides together, the
+                orders on their way counted at their size: without it, a model at odds with the market for a whole window
+                bought the same side again each time its edge came back, 1,346 contracts of the 22:15 window of 2026-10-13
 
 An order reaches its venue ORDER_SECONDS after it is decided, the 90th percentile of PredictionArbitrageTrader's live
 orders from the same AWS region, and fills against the newest book the venue made by then: the trader waits for a book
@@ -52,6 +55,7 @@ from upordowntrader.model import fair, pricing
 
 THRESHOLD = 0.02            # Edge after the fee, in dollars a contract, an order needs: the benchmark's best before the last 5 minutes.
 CONTRACTS = 10              # The most contracts an order takes.
+WINDOW_CONTRACTS = 50       # The most contracts the trader buys of one window on one venue, both sides together.
 MIN_LEFT = 300              # Seconds before the close the last order may be decided.
 DEPTH = 10                  # Levels a side the trader keeps of each book.
 VENUES = ("kalshi", "polymarket_us")
@@ -233,12 +237,14 @@ class PaperTrader:
     docstring. paper/run.py feeds it the windows, the variance forecast, and the fit, and settles its orders.
     """
 
-    def __init__(self, conn, log=print, clock=time.time, threshold=THRESHOLD, contracts=CONTRACTS, depth=DEPTH):
+    def __init__(self, conn, log=print, clock=time.time, threshold=THRESHOLD, contracts=CONTRACTS, window_contracts=WINDOW_CONTRACTS,
+                 depth=DEPTH):
         self.conn = conn
         self.log = log
         self.clock = clock
         self.threshold = threshold
         self.contracts = contracts
+        self.window_contracts = window_contracts
         self.depth = depth
         self.feeds = {}             # The streams by name, a venue or an exchange, whose ws is None while down. One without counts as up.
         self.venues = VENUES        # The venues traded.
@@ -254,6 +260,7 @@ class PaperTrader:
         self.armed = {}             # (venue, ticker, side) maps to whether its next edge starts an episode.
         self.busy = {}              # (venue, ticker, side) maps to when its order in flight is filled.
         self.taken = {}             # (venue, ticker, side) maps to {price: contracts its orders took}.
+        self.held = {}              # (venue, ticker) maps to the contracts orders filled, both sides together.
         self.pending = []           # Orders decided and not filled yet.
         self.orders = 0             # Orders stored since the start.
         self.errors = {}            # Each settled Kalshi window's tracking error, by ticker, see tracking_variance().
@@ -508,15 +515,24 @@ class PaperTrader:
             return
         if not self.armed.get(key, True) or now < self.busy.get(key, -math.inf):
             return
+        room = self.room(venue, ticker)
         offered = replay.untaken([(p, c) for p, c in levels if fair.edge(chance, p, rate) >= self.threshold], self.taken.get(key, {}))
-        if not offered:
+        if room <= 1e-9 or not offered:
             return
         self.armed[key] = False
         arrived = now + ORDER_SECONDS[venue]
         self.busy[key] = arrived + FEED_SECONDS[venue]
         self.pending.append({"venue": venue, "ticker": ticker, "close_time": w.market.close_time, "decided": now, "side": side, **seen,
                              "edge": fair.edge(chance, levels[0][0], rate), "limit_price": max(p for p, _ in offered),
-                             "offered": sum(c for _, c in offered), "arrived": arrived, "chance": chance})
+                             "offered": sum(c for _, c in offered), "arrived": arrived, "chance": chance, "size": min(self.contracts, room)})
+
+    def room(self, venue, ticker):
+        """
+        The contracts the window cap leaves an order on a venue's market: WINDOW_CONTRACTS less what orders filled there
+        and what those on their way may fill.
+        """
+        coming = sum(o["size"] for o in self.pending if (o["venue"], o["ticker"]) == (venue, ticker))
+        return self.window_contracts - self.held.get((venue, ticker), 0.0) - coming
 
     def fill_due(self, now):
         """
@@ -536,14 +552,14 @@ class PaperTrader:
     def fill(self, order):
         """
         Fill an order against the newest book its venue made by its arrival, at its limit or better, less what earlier orders
-        took, up to the order's size, then store and log it.
+        took, up to the order's size, then store and log it, and say when it fills the window's cap.
         """
-        venue, side, chance = order["venue"], order["side"], order.pop("chance")
+        venue, side, chance, wanted = order["venue"], order["side"], order.pop("chance"), order.pop("size")
         key = (venue, order["ticker"], side)
         before = [change for change in self.tapes.get(key[:2], ()) if change[0] <= order["arrived"]]
         levels = side_levels(before[-1][1:], side) if before else []
         ours = self.taken.setdefault(key, {})
-        filled, wanted = [], self.contracts
+        filled = []
         for p, c in replay.untaken([(p, c) for p, c in levels if p <= order["limit_price"] + 1e-9], ours):
             if wanted <= 0:
                 break
@@ -552,6 +568,7 @@ class PaperTrader:
         for p, c in filled:
             ours[round(p, 6)] = ours.get(round(p, 6), 0.0) + c
         contracts = sum(c for _, c in filled)
+        held = self.held[key[:2]] = self.held.get(key[:2], 0.0) + contracts
         rate = FEE_RATES[venue]
         row = {**order, "contracts": contracts, "cost": sum(p * c for p, c in filled) / contracts if contracts else None,
                "best": filled[0][0] if filled else None, "fees": sum(c * fair.fee(p, rate) for p, c in filled),
@@ -562,6 +579,8 @@ class PaperTrader:
         self.log(f"paper {venue} {side} {order['ticker']} with {(order['close_time'] - order['decided']) / 60:.1f} min left: edge "
                  f"{100 * order['edge']:.1f}c, fair {order['fair']:.1%} (model {order['model']:.1%}, Kalshi mid {order['mid']:.1%}), "
                  f"{order['offered']:g} offered to {order['limit_price']:.2f}, {took}")
+        if contracts and held >= self.window_contracts - 1e-9:
+            self.log(f"paper {venue} {order['ticker']} holds {held:g} contracts, the window's cap, so it takes no more")
 
     # TIME
 
@@ -577,9 +596,9 @@ class PaperTrader:
             del self.readings[s]
         for close in [c for c in self.windows if c < now - WINDOW_KEEP]:
             markets = set(self.windows.pop(close).names.items())
-            for held in (self.books, self.tapes, self.taken, self.armed, self.busy):
-                for key in [k for k in held if k[:2] in markets]:
-                    del held[key]
+            for kept in (self.books, self.tapes, self.taken, self.armed, self.busy, self.held):
+                for key in [k for k in kept if k[:2] in markets]:
+                    del kept[key]
             self.halted -= markets
 
     def stop(self, now):

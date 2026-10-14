@@ -143,6 +143,22 @@ def test_an_edge_is_taken_once_until_it_falls_below_the_threshold_and_then_less_
     assert orders(t)[-1]["offered"] == 20.0                     # so 52 cents is gone for us, and 54 cents was not taken.
 
 
+def test_a_window_takes_no_more_than_its_cap_on_a_venue_counting_the_orders_on_their_way(tmp_path):
+    t, clock, logs = setup(tmp_path)
+    t.window_contracts = 25
+    t.on_book("kalshi", "K", BIDS, [[0.52, 1000.0], [0.54, 1000.0]], clock.now)
+    sizes = []
+    for _ in range(4):                                          # Four episodes of the same edge.
+        quote(t, clock, 80_110.0)
+        sizes.append(t.pending[0]["size"] if t.pending else None)
+        if t.pending:
+            assert t.room("kalshi", "K") == 25 - sum(o["contracts"] for o in orders(t)) - t.pending[0]["size"]
+        step(t, clock, clock.now + 1)
+        quote(t, clock, 80_050.0)
+    assert sizes == [10, 10, 5, None] and [o["contracts"] for o in orders(t)] == [10.0, 10.0, 5.0]
+    assert logs.count("paper kalshi K holds 25 contracts, the window's cap, so it takes no more") == 1
+
+
 def test_no_order_in_the_last_five_minutes_or_on_a_book_whose_stream_is_down(tmp_path):
     t, clock, _ = setup(tmp_path)
     t.on_book("kalshi", "K", BIDS, ASKS, clock.now)

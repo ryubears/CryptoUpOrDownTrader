@@ -208,7 +208,7 @@ async def trade(db_path=None, seconds=None, log=log):
     started = last_status = time.time()
     window = None
     log(f"paper trading {SERIES} on {', '.join(trader.venues)} at an edge of {100 * trader.threshold:.0f}c, up to {trader.contracts} "
-        f"contracts an order, with code {code_version()}")
+        f"contracts an order and {trader.window_contracts} a window on each venue, with code {code_version()}")
     try:
         while seconds is None or time.time() - started < seconds:
             await asyncio.sleep(1)

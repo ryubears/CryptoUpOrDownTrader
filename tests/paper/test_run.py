@@ -150,3 +150,8 @@ def test_the_status_line_counts_the_opportunities_one_order_could_have_taken_tod
                                         opportunity(start=now - 2 * 86400)])
     line = run.status(conn, PaperTrader(conn))
     assert line.endswith("; 1 opportunities at 2c or more, 50$ in one order each expecting +2.00$")
+
+
+def test_a_time_to_report_from_is_read_in_utc_unless_it_says_otherwise():
+    assert report.utc_time("2026-10-14T01:00") == 1791939600
+    assert report.utc_time("2026-10-13T21:00-04:00") == 1791939600

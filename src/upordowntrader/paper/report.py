@@ -19,6 +19,7 @@ locked in.
 Run from src/ with:
     python3 -m upordowntrader.paper.report
     python3 -m upordowntrader.paper.report --hours 24
+    python3 -m upordowntrader.paper.report --since 2026-10-14T01:00
 """
 
 import argparse
@@ -178,14 +179,24 @@ def report_opportunities(opportunities, label, log=print):
                                                         "minutes"), largest, log)
 
 
+def utc_time(text):
+    """
+    Seconds since 1970 for an ISO 8601 time, in UTC unless it says otherwise.
+    """
+    when = datetime.fromisoformat(text)
+    return (when if when.tzinfo else when.replace(tzinfo=UTC)).timestamp()
+
+
 # MAIN
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Report what the paper orders made, and the opportunities.")
     ap.add_argument("--db", help="the database the orders are in, by default data/history.sqlite")
     ap.add_argument("--hours", type=float, help="only the last this many hours, by default everything")
+    ap.add_argument("--since", type=utc_time, help="only from this time, in UTC, as 2026-10-14T01:00, such as since a change of the rule")
     args = ap.parse_args()
     conn = database.connect(args.db)
-    since = time.time() - 3600 * args.hours if args.hours else 0.0
+    since = max(time.time() - 3600 * args.hours if args.hours else 0.0, args.since or 0.0)
+    label = f"since {datetime.fromtimestamp(since, UTC):%Y-%m-%d %H:%M} UTC" if since else "since the first"
     report([o for o in database.load_paper_orders(conn) if o["decided"] >= since])
-    report_opportunities(database.load_opportunities(conn, since), f"the last {args.hours:g} hours" if args.hours else "since the first")
+    report_opportunities(database.load_opportunities(conn, since), label)
