@@ -20,15 +20,33 @@ works its settlement out from the marks, by Hyperliquid's rule.
 Each market has a book for each side, Yes and No, merged, so a Yes bid at p is a No ask at 1 - p and the Yes side's
 book is the whole of it. A side's coin is '#' and 10 times the market's number, plus 1 for No. The books are thin: on
 2026-10-12 a few tens of contracts a level. The perp's mark comes about once a second without a time; its best bid and
-ask come as they change, with Hyperliquid's time. This is the only file that knows Hyperliquid's field
-names and message formats.
+ask come as they change, with Hyperliquid's time.
+
+Orders are signed, not sent with a key: an API wallet the account approved on Hyperliquid, which can trade but not
+withdraw, signs each action, see signature(), and the account, which holds the USDC and the positions, is named by its
+address for the reads. Both live in data/, see ACCOUNT_FILE and AGENT_KEY_FILE. An outcome side is ordered by its asset
+number, see asset(), and buying No is buying the No side's coin. Opening a position is free; Hyperliquid charges outcome
+trades only when a position is closed or settles, see SETTLE_FEE_RATE. Hyperliquid's terms bar US persons and use from
+the US, which the AWS instance in us-east-1 is.
+
+This is the only file that knows Hyperliquid's field names and message formats.
 """
 
+import eth_account
+import functools
 import json
+import msgpack
+import time
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
+from eth_account.messages import encode_typed_data
+from eth_utils import keccak, to_hex
+from upordowntrader.api import http
 from upordowntrader.api.bookstream import BookStream
 from upordowntrader.api.http import RateLimiter, post_json
+from upordowntrader.common.paths import DATA_DIR
 from upordowntrader.db.models import Market
 
 INFO_URL = "https://api.hyperliquid.xyz/info"
@@ -40,6 +58,19 @@ FIFTEEN_DEPLOYER = "out"        # The deployer of the 15 minute series.
 FIFTEEN_SECONDS = 900
 PERIODS = {"15m": 900, "1h": 3600, "1d": 86400}     # A recurring series' period, as Hyperliquid writes it, in seconds.
 CANDLE_LIMIT = 5000         # The most recent candles Hyperliquid keeps of each length.
+EXCHANGE_URL = "https://api.hyperliquid.xyz/exchange"
+ACCOUNT_FILE = DATA_DIR / "hyperliquid_account.txt"     # The account's address, 0x and 40 hex digits, which holds the money.
+AGENT_KEY_FILE = DATA_DIR / "hyperliquid_agent_key.txt"     # The private key of an API wallet the account approved.
+OUTCOME_ASSETS = 100_000_000    # An outcome side's asset number is this plus its coin's number, see asset().
+SETTLE_FEE_RATE = 0.0007    # What Hyperliquid may take of a winning contract's dollar at settlement: its base spot taker rate,
+                            # an upper bound, as its fee page gives no outcome rate. Opening is free. Unconfirmed until an account
+                            # reads its own, see user_fees().
+ORDER_TIMEOUT = 10          # Seconds an order's answer may take.
+SIGNIFICANT = 5             # The most significant figures a price may have.
+DOMAIN = {"chainId": 1337, "name": "Exchange", "verifyingContract": "0x0000000000000000000000000000000000000000", "version": "1"}
+AGENT_TYPES = {"Agent": [{"name": "source", "type": "string"}, {"name": "connectionId", "type": "bytes32"}],
+               "EIP712Domain": [{"name": "name", "type": "string"}, {"name": "version", "type": "string"},
+                                {"name": "chainId", "type": "uint256"}, {"name": "verifyingContract", "type": "address"}]}
 
 
 # MARKETS
@@ -185,6 +216,194 @@ def minute_candles(perp, start, end):
     rows = post_json(INFO_URL, {"type": "candleSnapshot", "req": {"coin": perp, "interval": "1m", "startTime": int(start * 1000),
                                                                    "endTime": int(end * 1000)}}, LIMITER)
     return sorted((c["t"] // 1000, float(c["o"]), float(c["h"]), float(c["l"]), float(c["c"]), float(c["v"]), c.get("n")) for c in rows)
+
+
+# ORDERS
+
+@functools.cache
+def credentials():
+    """
+    The account's address and the API wallet's Account, which signs, read from the data folder once.
+    """
+    return ACCOUNT_FILE.read_text().strip(), eth_account.Account.from_key(AGENT_KEY_FILE.read_text().strip())
+
+
+def has_key():
+    """
+    Whether the account's address and the API wallet's key are in the data folder.
+    """
+    return ACCOUNT_FILE.exists() and AGENT_KEY_FILE.exists()
+
+
+def asset(coin):
+    """
+    The asset number an order names an outcome side by: OUTCOME_ASSETS plus the side's coin's number, 100001230 for '#1230'.
+    """
+    return OUTCOME_ASSETS + int(coin[1:])
+
+
+def side_coin(ticker, side):
+    """
+    The coin to buy for a side of a window, its ticker the Yes side's coin: the ticker for 'yes', its No side for 'no'.
+    """
+    return ticker if side == "yes" else coin(outcome_of(ticker), 1)
+
+
+def wire(x):
+    """
+    A price or size as Hyperliquid hashes it, as its own SDK writes one: up to 8 decimals without trailing zeros, '0.54'
+    or '10'. One that would round is refused.
+    """
+    text = f"{x:.8f}"
+    if abs(float(text) - x) >= 1e-12:
+        raise ValueError(f"{x!r} has more than 8 decimals")
+    return f"{Decimal(text).normalize():f}"
+
+
+def price_wire(price):
+    """
+    A price cut to the SIGNIFICANT figures Hyperliquid takes, as wire() writes it.
+    """
+    return wire(float(f"{price:.{SIGNIFICANT}g}"))
+
+
+def client_id():
+    """
+    A new id for an order, sent with it, so an order whose answer was lost can be found: 0x and 32 hex digits.
+    """
+    return f"0x{uuid.uuid4().hex}"
+
+
+def order_action(coin, is_buy, price, size, tif="Ioc", cloid=None):
+    """
+    The action that places one limit order on an outcome side: 'Ioc' fills what it can at once and drops the rest, 'Alo'
+    only rests, 'Gtc' does either. The fields' order matters, as the action is hashed as written.
+    """
+    order = {"a": asset(coin), "b": is_buy, "p": price_wire(price), "s": wire(size), "r": False, "t": {"limit": {"tif": tif}}}
+    if cloid:
+        order["c"] = cloid
+    return {"type": "order", "orders": [order], "grouping": "na"}
+
+
+def cancel_action(coin, cloid):
+    """
+    The action that cancels an order by our id for it.
+    """
+    return {"type": "cancelByCloid", "cancels": [{"asset": asset(coin), "cloid": cloid}]}
+
+
+def signature(action, nonce, account, expires_after=None):
+    """
+    An API wallet's signature of an action, as Hyperliquid's own SDK makes it: an EIP-712 'Agent' message whose
+    connectionId is the keccak hash of the action packed with msgpack, the nonce, no vault, and the expiry, in
+    milliseconds, when there is one.
+    """
+    data = msgpack.packb(action) + nonce.to_bytes(8, "big") + b"\x00"
+    if expires_after is not None:
+        data += b"\x00" + expires_after.to_bytes(8, "big")
+    message = encode_typed_data(full_message={"domain": DOMAIN, "types": AGENT_TYPES, "primaryType": "Agent",
+                                              "message": {"source": "a", "connectionId": keccak(data)}})
+    signed = account.sign_message(message)
+    return {"r": to_hex(signed.r), "s": to_hex(signed.s), "v": signed.v}
+
+
+_last_nonce = 0
+
+
+def nonce():
+    """
+    The time in milliseconds, made larger than the last one handed out, as Hyperliquid takes each nonce once.
+    """
+    global _last_nonce
+    _last_nonce = max(int(time.time() * 1000), _last_nonce + 1)
+    return _last_nonce
+
+
+def send(action, account=None, expires_after=None):
+    """
+    Sign an action with the API wallet and send it once, without retrying, as a retry could place an order twice: the
+    answer as JSON, its 'status' 'ok' or 'err'. A lost answer is found later by the order's client_id.
+    """
+    account = account or credentials()[1]
+    n = nonce()
+    body = {"action": action, "nonce": n, "signature": signature(action, n, account, expires_after), "vaultAddress": None,
+            "expiresAfter": expires_after}
+    return http.CLIENT.post(EXCHANGE_URL, json=body, timeout=ORDER_TIMEOUT).json()
+
+
+def place(coin, is_buy, price, size, tif="Ioc", cloid=None, account=None):
+    """
+    Place one limit order on an outcome side, see order_action(), and return Hyperliquid's answer, see answer().
+    """
+    return send(order_action(coin, is_buy, price, size, tif, cloid), account)
+
+
+def cancel(coin, cloid, account=None):
+    """
+    Cancel an order by our id for it.
+    """
+    return send(cancel_action(coin, cloid), account)
+
+
+def answer(response, size):
+    """
+    What an order's answer says, as (status, contracts filled, their average price, Hyperliquid's id for the order, why
+    not): status 'filled' or 'partial' for what an order took at once, 'resting' for one left on the book, 'unfilled'
+    for one that met nothing, 'rejected' for one refused, and 'error' for an answer that was not about the order.
+    """
+    if not isinstance(response, dict) or response.get("status") != "ok":
+        return "error", 0.0, None, None, str(response)[:500]
+    statuses = ((response.get("response") or {}).get("data") or {}).get("statuses") or [{}]
+    s = statuses[0]
+    if "filled" in s:
+        filled = float(s["filled"]["totalSz"])
+        return ("filled" if filled >= size - 1e-9 else "partial"), filled, float(s["filled"]["avgPx"]), s["filled"].get("oid"), None
+    if "resting" in s:
+        return "resting", 0.0, None, s["resting"].get("oid"), None
+    why = str(s.get("error", s))
+    return ("unfilled" if "could not immediately match" in why else "rejected"), 0.0, None, None, why
+
+
+def info(body):
+    """
+    One read of the info endpoint.
+    """
+    return post_json(INFO_URL, body, LIMITER)
+
+
+def order_status(user, cloid):
+    """
+    An order of the account's, found by our id for it: its status and what it filled.
+    """
+    return info({"type": "orderStatus", "user": user, "oid": cloid})
+
+
+def user_fills(user, start):
+    """
+    The account's fills from start, in seconds since 1970, each with its price, size, fee, and order.
+    """
+    return info({"type": "userFillsByTime", "user": user, "startTime": int(start * 1000)})
+
+
+def user_fees(user):
+    """
+    The account's fee rates and its volume, as Hyperliquid charges them.
+    """
+    return info({"type": "userFees", "user": user})
+
+
+def balances(user):
+    """
+    The account's spot balances, USDC among them, from which outcome orders are paid.
+    """
+    return info({"type": "spotClearinghouseState", "user": user})
+
+
+def open_orders(user):
+    """
+    The account's orders resting on a book.
+    """
+    return info({"type": "openOrders", "user": user})
 
 
 # STREAMING

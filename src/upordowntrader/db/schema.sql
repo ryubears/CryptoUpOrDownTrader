@@ -112,15 +112,16 @@ CREATE TABLE IF NOT EXISTS minutes (
 -- The paper trader's orders, see paper/trader.py: what it would have sent and why, what the venue's book filled when the
 -- order would have reached it, and, once the window settled, what that made. Times in seconds since 1970.
 CREATE TABLE IF NOT EXISTS paper_orders (
-    venue        TEXT NOT NULL,      -- 'kalshi' or 'polymarket_us'.
-    ticker       TEXT NOT NULL,      -- The venue's market.
+    venue        TEXT NOT NULL,      -- 'kalshi', 'polymarket_us', or 'hyperliquid'.
+    ticker       TEXT NOT NULL,      -- The venue's market: for Hyperliquid its Yes side's coin, '#1277300'.
     close_time   INTEGER NOT NULL,   -- When the window closes, which the venues' markets of a window share.
     decided      REAL NOT NULL,      -- When the order was decided, by our clock.
     side         TEXT NOT NULL,      -- 'yes' or 'no'.
     price        REAL NOT NULL,      -- Bitcoin's price the model read, the exchanges' average moved onto BRTI's level.
     model        REAL NOT NULL,      -- The model's chance of Up, recalibrated.
     mid          REAL NOT NULL,      -- Kalshi's mid then, an empty side counted as a bid of 0 or an ask of 1.
-    fair         REAL NOT NULL,      -- The fair price of Up traded on, the model blended with Kalshi's mid.
+    fair         REAL NOT NULL,      -- The fair price of Up traded on, the model blended with Kalshi's mid, or on Hyperliquid
+                                     -- Kalshi's mid alone.
     edge         REAL NOT NULL,      -- The best price's edge after the venue's taker fee, in dollars a contract.
     limit_price  REAL NOT NULL,      -- The worst price, on the side bought, whose edge reached the threshold.
     offered      REAL NOT NULL,      -- Contracts at the limit or better as decided, less what earlier orders took.
@@ -131,7 +132,8 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     fees         REAL NOT NULL,      -- The taker fees on them, in dollars.
     expected     REAL NOT NULL,      -- The fair price's edge after the fee on the contracts filled, in dollars.
     result       TEXT,               -- 'yes' or 'no' once the venue settled the window, null until.
-    profit       REAL,               -- What the contracts filled made after the fees, in dollars, once settled.
+    profit       REAL,               -- What the contracts filled made after the fees, in dollars, once settled, Hyperliquid's
+                                     -- taken from the winning contracts' dollars as they settle.
     cause        TEXT,               -- What brought the decision: the venue whose book of the window's market changed,
                                      -- 'kalshi' or 'polymarket_us', the exchange whose quote moved the price, as 'coinbase',
                                      -- 'time' for the once a second pricing, or 'other' for another market's book. Null for
@@ -142,10 +144,11 @@ CREATE TABLE IF NOT EXISTS paper_orders (
 
 -- Each stretch where buying one side of a window's market on a venue had a positive edge after the venue's taker fee, by
 -- the fair price the paper trader trades on, one row as the stretch ends, as PredictionArbitrageTrader records its
--- opportunities, see paper/trader.py. Profits are expected ones, the fair price's edge, not locked in as an arbitrage's.
--- Times in seconds since 1970 by our clock, dollars a contract or in all as said.
+-- opportunities, see paper/trader.py. Profits are expected ones, the fair price's edge, until the window settles and the
+-- actual ones are set beside them, see database.settle_opportunities(). Times in seconds since 1970 by our clock, dollars a
+-- contract or in all as said.
 CREATE TABLE IF NOT EXISTS opportunities (
-    venue             TEXT NOT NULL,      -- 'kalshi' or 'polymarket_us'.
+    venue             TEXT NOT NULL,      -- 'kalshi', 'polymarket_us', or 'hyperliquid'.
     ticker            TEXT NOT NULL,      -- The venue's market.
     close_time        INTEGER NOT NULL,   -- When the window closes, which the venues' markets of a window share.
     side              TEXT NOT NULL,      -- 'yes' or 'no'.
@@ -172,7 +175,82 @@ CREATE TABLE IF NOT EXISTS opportunities (
                                           -- without one.
     take_capital      REAL,               -- What they cost with the fees.
     take_profit       REAL,               -- Their expected profit.
+    take_return_pct   REAL,               -- take_profit over take_capital, as a percent.
+    min_edge_total    REAL,               -- Seconds at min_edge or more in all, over every stretch, null without one.
+    result            TEXT,               -- How the venue settled the window, 'yes' or 'no', null until it has.
+    actual_profit     REAL,               -- What the take made once settled: its winning contracts' dollars, less a venue's fee on
+                                          -- them, less take_capital. Null until settled, or without a take.
+    actual_return_pct REAL,               -- actual_profit over take_capital, as a percent.
     PRIMARY KEY (venue, ticker, side, start_time)
 );
+-- The last five columns came after the table had rows, see database.ADDED_COLUMNS, and so did the index of those not
+-- settled, see database.ADDED_INDEXES.
 
 CREATE INDEX IF NOT EXISTS idx_opportunities_start ON opportunities (start_time);
+
+-- Each decision to buy one side of a window's market on a venue with real money, or in its paper twin, as
+-- PredictionArbitrageTrader keeps its trades, see live/executor.py: what was wanted, and in the end what its orders filled.
+-- Times in seconds since 1970 by our clock.
+CREATE TABLE IF NOT EXISTS trades (
+    id           INTEGER PRIMARY KEY,
+    mode         TEXT NOT NULL,      -- 'live' for real orders, 'paper' for none.
+    venue        TEXT NOT NULL,      -- 'hyperliquid', so far.
+    ticker       TEXT NOT NULL,      -- The venue's market, for Hyperliquid its Yes side's coin.
+    close_time   INTEGER NOT NULL,   -- When the window closes.
+    side         TEXT NOT NULL,      -- 'yes' or 'no', the side bought.
+    signal_ts    REAL NOT NULL,      -- When it was decided.
+    fair         REAL NOT NULL,      -- The chance the side bought pays, as decided on.
+    edge         REAL NOT NULL,      -- Dollars a contract at the best price, after the fee, at the signal.
+    quantity     REAL NOT NULL,      -- Contracts wanted.
+    limit_price  REAL NOT NULL,      -- The worst price a contract accepted.
+    filled       REAL NOT NULL,      -- Contracts its orders filled.
+    cost         REAL NOT NULL,      -- Dollars paid for them, fees included.
+    fees         REAL NOT NULL,      -- Fees paid when they were bought.
+    status       TEXT NOT NULL,      -- 'sent' while its order is out, then 'filled', 'partial', 'unfilled', or 'failed'.
+    pays_at      REAL NOT NULL       -- When the window pays.
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_market ON trades (venue, ticker);
+
+-- Every real order sent to a venue, stored before it goes out and updated with the venue's answer, as
+-- PredictionArbitrageTrader keeps its orders. Times in seconds since 1970 by our clock.
+CREATE TABLE IF NOT EXISTS orders (
+    id             INTEGER PRIMARY KEY,
+    trade_id       INTEGER NOT NULL,   -- The trade it was sent for, see trades.
+    venue          TEXT NOT NULL,
+    ticker         TEXT NOT NULL,      -- The trade's market.
+    coin           TEXT NOT NULL,      -- What the order named: on Hyperliquid the side's coin, '#1277301' for No.
+    action         TEXT NOT NULL,      -- 'buy' or 'sell'.
+    outcome        TEXT NOT NULL,      -- 'yes' or 'no'.
+    quantity       REAL NOT NULL,      -- Contracts asked for.
+    limit_price    REAL NOT NULL,      -- The worst price a contract accepted, before fees.
+    tif            TEXT NOT NULL,      -- How long it may wait: 'Ioc' fills at once or not at all, 'Alo' only rests, 'Gtc' either.
+    client_id      TEXT NOT NULL,      -- Our id for the order, sent with it, so one whose answer was lost can be found.
+    sent_at        REAL NOT NULL,
+    status         TEXT NOT NULL,      -- 'sent' until the venue answers, then 'filled', 'partial', 'resting', 'unfilled',
+                                       -- 'rejected', or 'error'.
+    venue_order_id TEXT,               -- The venue's id for the order, once it answered.
+    answered_at    REAL,
+    latency_ms     INTEGER,            -- From sending the order to its answer.
+    filled         REAL NOT NULL,      -- Contracts bought or sold.
+    dollars        REAL NOT NULL,      -- Paid for a buy or received for a sale, fees included.
+    fees           REAL NOT NULL,
+    note           TEXT,               -- Why the venue refused the order, or the error.
+    response       TEXT,               -- The venue's answer as JSON, for reconciling.
+    book_at        REAL,               -- The venue's time for the market's newest book when the order went out.
+    book_ts        REAL                -- When that book reached us. sent_at less it is how stale the book was.
+);
+
+CREATE INDEX IF NOT EXISTS idx_orders_trade ON orders (trade_id);
+
+-- How each trade paid out, one row once its window settled, as PredictionArbitrageTrader keeps its settlements. A trade
+-- with no row here is still open. Times in seconds since 1970.
+CREATE TABLE IF NOT EXISTS settlements (
+    trade_id       INTEGER PRIMARY KEY,   -- The trade, see trades.
+    mode           TEXT NOT NULL,         -- The trade's mode.
+    settled_at     REAL NOT NULL,         -- The venue's settlement time.
+    result         TEXT NOT NULL,         -- How the market settled, 'yes' or 'no'.
+    payout         REAL NOT NULL,         -- Dollars the contracts held paid: one each when the side bought won.
+    fees           REAL NOT NULL,         -- What the venue took at settlement.
+    profit         REAL NOT NULL          -- payout less fees less the trade's cost.
+);

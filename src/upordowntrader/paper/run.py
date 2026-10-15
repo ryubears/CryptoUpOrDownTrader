@@ -3,14 +3,15 @@ Paper trade Kalshi's and Polymarket US's Bitcoin 15 minute windows live, see pap
 streams of its own, so either can stop or change without the other.
 
 The process streams Kalshi's books of the window trading and the next, Polymarket US's of the same windows when its API
-key is in data/, and the best bid and ask of the exchanges BRTI is built from. It reads Kalshi's windows just after each
+key is in data/, Hyperliquid's of the same windows as it lists them, and the best bid and ask of the exchanges BRTI is
+built from. It reads Kalshi's windows just after each
 quarter hour and every REFRESH_SECONDS, and every STRIKE_SECONDS while the window trading has no strike yet. Once a window
 opens it reads the window's tracking variance from the recorded quotes, and, when the trader started after the window
 opened, its offset, see trader.recorded_offset(). Every VARIANCE_SECONDS it reads Coinbase's minutes again for the
 variance forecast, and every FIT_SECONDS it downloads Kalshi's windows settled since, see history/markets.py, and fits
 the recalibration and the blend again on the TRAIN_DAYS before, see benchmark.fit_before(). Nothing is traded until the
-first fit is made, a minute or two after the start. Every SETTLE_SECONDS it reads how the windows with paper orders
-settled, on each order's own venue, and stores what they made. The trader stores the opportunities it sees as they end,
+first fit is made, a minute or two after the start. Every SETTLE_SECONDS it reads how the windows with paper orders or
+opportunities settled, on each one's own venue, and stores what they made. The trader stores the opportunities it sees as they end,
 and those still open as the process stops. A status line comes every STATUS_SECONDS. The work on the database outside
 the trader's own writes runs in threads on connections of their own.
 
@@ -27,21 +28,23 @@ import math
 import signal
 import time
 from datetime import UTC, datetime, timedelta
-from upordowntrader.api import kalshi, polymarket_us
+from upordowntrader.api import hyperliquid, kalshi, polymarket_us
 from upordowntrader.backtest import benchmark, replay
 from upordowntrader.common.log import log, on_failure
 from upordowntrader.common.periodic import Periodic
 from upordowntrader.db import database
 from upordowntrader.history import download, markets
 from upordowntrader.model import fair
-from upordowntrader.paper.trader import PaperTrader, recorded_offset, tracking_variance
+from upordowntrader.paper.trader import SETTLE_FEES, PaperTrader, recorded_offset, tracking_variance
 from upordowntrader.record.run import QUOTE_STREAMS, code_version
 
 SERIES = "KXBTC15M"
 WINDOW_SECONDS = 900
 OPEN_DELAY = 2              # Seconds after a window opens before it is read again, so Kalshi has set its strike.
 REFRESH_SECONDS = 60
-STRIKE_SECONDS = 2          # Seconds between reads while the window trading has no strike yet.
+STRIKE_SECONDS = 2          # Seconds between reads while the window trading has no strike yet, or no Hyperliquid market.
+LISTING_SECONDS = 60        # Seconds into a window Hyperliquid's market for it is looked for that often.
+HYPERLIQUID_SERIES = f"{hyperliquid.FIFTEEN_DEPLOYER}-BTC-15m"
 LOOKAHEAD_SECONDS = 1800    # How far ahead the windows read reach: past the one trading now to the next.
 VARIANCE_SECONDS = 60
 FIT_SECONDS = 86400
@@ -97,15 +100,20 @@ def make_fit(db_path):
 
 async def refresh(trader, streams, db_path):
     """
-    Price Kalshi's windows closing from now to LOOKAHEAD_SECONDS ahead, stream their books on each venue traded, and read
-    the tracking variance of each opened with its strike, and its offset when the trader has no readings from before it
-    opened. The books of windows closed are dropped from the streams.
+    Price Kalshi's windows closing from now to LOOKAHEAD_SECONDS ahead, with Hyperliquid's markets of them as it lists
+    them, stream their books on each venue traded, and read the tracking variance of each opened with its strike, and its
+    offset when the trader has no readings from before it opened. The books of windows closed are dropped from the
+    streams, all but Hyperliquid's perp, whose marks keep its connection from going quiet.
     """
     now = time.time()
     found = [m for m in await asyncio.to_thread(kalshi.windows, SERIES, now - WINDOW_SECONDS, now + LOOKAHEAD_SECONDS) if m.close_time > now]
     trader.set_windows(found)
+    if "hyperliquid" in streams:
+        trader.name_windows("hyperliquid", [m for m in await asyncio.to_thread(hyperliquid.windows) if m.series == HYPERLIQUID_SERIES])
     for venue, stream in streams.items():
-        names = {trader.windows[m.close_time].names[venue] for m in found}
+        names = {trader.windows[m.close_time].names[venue] for m in found if venue in trader.windows[m.close_time].names}
+        if venue == "hyperliquid":
+            names |= set(hyperliquid.UNDERLYINGS)
         stream.add(names)
         stream.remove(stream.wanted - names)
     for w in trader.windows.values():
@@ -134,18 +142,32 @@ async def refit(trader, db_path):
                f"left: {' '.join(f'{m:.2f}/{p:.2f}' for _, m, p in fit.blend[::-1])}")
 
 
-async def settle(conn, log):
+def results(pending):
     """
-    Read how the windows with paper orders closed and not settled yet went, each on its own venue, and settle the orders.
+    The markets of the (venue, ticker) pending, as Markets, read from each venue: Kalshi's in batches, Polymarket US's one
+    by one, and Hyperliquid's from the windows it settled lately, see hyperliquid.settlements().
     """
-    pending = database.unsettled_paper_markets(conn, time.time())
-    if not pending:
-        return
     tickers = [ticker for venue, ticker in pending if venue == "kalshi"]
     names = [ticker for venue, ticker in pending if venue == "polymarket_us"]
-    found = await asyncio.to_thread(lambda: [*(kalshi.markets(tickers) if tickers else []), *(polymarket_us.window(name) for name in names)])
-    for m in found:
-        if m is not None and m.result in ("yes", "no") and database.settle_paper_orders(conn, m.venue, m.ticker, m.result):
+    coins = {ticker for venue, ticker in pending if venue == "hyperliquid"}
+    return [*(kalshi.markets(tickers) if tickers else []), *(polymarket_us.window(name) for name in names),
+            *(m for m in (hyperliquid.settlements() if coins else []) if m.ticker in coins)]
+
+
+async def settle(conn, log):
+    """
+    Read how the windows with paper orders or opportunities closed and not settled yet went, each on its own venue, and
+    settle them, less a venue's fee at settlement, see trader.SETTLE_FEES.
+    """
+    pending = database.unsettled_markets(conn, time.time())
+    if not pending:
+        return
+    for m in await asyncio.to_thread(results, pending):
+        if m is None or m.result not in ("yes", "no"):
+            continue
+        fee = SETTLE_FEES.get(m.venue, 0.0)
+        database.settle_opportunities(conn, m.venue, m.ticker, m.result, fee)
+        if database.settle_paper_orders(conn, m.venue, m.ticker, m.result, fee):
             made = conn.execute("SELECT COUNT(*), SUM(contracts), SUM(profit) FROM paper_orders WHERE venue = ? AND ticker = ?",
                                 (m.venue, m.ticker)).fetchone()
             log(f"paper {m.venue} {m.ticker} settled {m.result}: {made[0]} orders, {made[1]:g} contracts, {made[2]:+.2f}$")
@@ -170,7 +192,7 @@ def status(conn, trader):
                 f"against {w.market.strike:,.2f}")
     ready = "" if trader.fit is not None and trader.variance is not None else ", waiting for the fit and the variance forecast"
     return (f"{line}{ready}; today {orders} orders, {contracts:g} contracts, {profit:+.2f}$ settled, {unsettled or 0} orders to settle; "
-            f"{found} opportunities at {100 * trader.threshold:.0f}c or more, {capital:,.0f}$ in one order each expecting {expected:+,.2f}$")
+            f"{found} opportunities at their venue's threshold or more, {capital:,.0f}$ in one order each expecting {expected:+,.2f}$")
 
 
 # MAIN LOOP
@@ -187,7 +209,10 @@ async def trade(db_path=None, seconds=None, log=log):
         venue_streams["polymarket_us"] = polymarket_us.PolymarketUSBookStream(
             [], lambda t, b, a, s: trader.on_book("polymarket_us", t, b, a, s), lambda start, end, ids: trader.on_gap("polymarket_us", ids), log)
     else:
-        log(f"no Polymarket US API key in {polymarket_us.KEY_ID_FILE.parent}, so only Kalshi is traded")
+        log(f"no Polymarket US API key in {polymarket_us.KEY_ID_FILE.parent}, so Polymarket US is not traded")
+    venue_streams["hyperliquid"] = hyperliquid.HyperliquidBookStream(list(hyperliquid.UNDERLYINGS),
+                                                                     lambda t, b, a, s: trader.on_book("hyperliquid", t, b, a, s),
+                                                                     lambda start, end, ids: trader.on_gap("hyperliquid", ids), log)
     trader.venues = tuple(venue_streams)
     for venue, stream in venue_streams.items():
         stream.depth = trader.depth
@@ -207,8 +232,9 @@ async def trade(db_path=None, seconds=None, log=log):
     settler = Periodic(SETTLE_SECONDS, log, "paper: settling")
     started = last_status = time.time()
     window = None
-    log(f"paper trading {SERIES} on {', '.join(trader.venues)} at an edge of {100 * trader.threshold:.0f}c, up to {trader.contracts} "
-        f"contracts an order and {trader.window_contracts} a window on each venue, with code {code_version()}")
+    edges = ", ".join(f"{venue} at {100 * trader.thresholds[venue]:.0f}c" for venue in trader.venues)
+    log(f"paper trading {SERIES} on {edges}, up to {trader.contracts} contracts an order and {trader.window_contracts} a window on each "
+        f"venue, with code {code_version()}")
     try:
         while seconds is None or time.time() - started < seconds:
             await asyncio.sleep(1)
@@ -218,7 +244,9 @@ async def trade(db_path=None, seconds=None, log=log):
                 window = int((now - OPEN_DELAY) // WINDOW_SECONDS)
                 refresher.again()
             w = trader.opened(now)
-            if w and (w.market.strike is None or w.tracking is None or w.offset is None) and now - (refresher.last or 0) >= STRIKE_SECONDS:
+            unlisted = w is not None and now - w.market.open_time < LISTING_SECONDS and any(v not in w.names for v in trader.venues)
+            waiting = w is not None and (w.market.strike is None or w.tracking is None or w.offset is None or unlisted)
+            if waiting and now - (refresher.last or 0) >= STRIKE_SECONDS:
                 refresher.again()
             refresher.tick(now, lambda: refresh(trader, venue_streams, db_path))
             variance.tick(now, lambda: refresh_variance(trader, db_path))

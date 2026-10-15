@@ -1,13 +1,18 @@
 """
-Tests for Hyperliquid's up or down windows read from its market list, their settlements read from its explorer, and its
-streams, fed messages shaped as Hyperliquid sends them.
+Tests for Hyperliquid's up or down windows read from its market list, their settlements read from its explorer, its
+streams, fed messages shaped as Hyperliquid sends them, and its orders, signed as its own SDK signs them.
 """
 
+import eth_account
 import httpx
 import json
 import pytest
 from datetime import UTC, datetime
 from upordowntrader.api import hyperliquid
+
+TEST_KEY = "0x0123456789012345678901234567890123456789012345678901234567890123"    # A throwaway key, Hyperliquid's SDK's tests'.
+CLOID = "0x00000000000000000000000000000001"
+NONCE = 1792070000000
 
 FIFTEEN = {"outcome": 11376, "name": "template:binaryPrice", "venue": "out", "quoteToken": "USDC",
            "description": "perp:BTC|priceDescription:BTC-USDC perp mark|seconds:60|threshold:83984|time:20261012-0545"}
@@ -118,3 +123,56 @@ def test_listings_say_when_each_window_was_listed_and_candles_come_oldest_first(
     close = int(datetime(2026, 10, 12, 11, 15, tzinfo=UTC).timestamp())
     assert hyperliquid.listings() == {("out-BTC-15m", close, 83474.0): pytest.approx(1791783014.442)}
     assert [c[0] for c in hyperliquid.minute_candles("BTC", 1791783000, 1791783120)] == [1791783000, 1791783060]
+
+
+# ORDERS: the signatures below are what Hyperliquid's own SDK, hyperliquid-python-sdk 0.24.0, makes of the same actions
+# with TEST_KEY: sign_l1_action(wallet, action, None, NONCE, expires_after, True).
+
+def test_an_order_on_an_outcome_side_is_written_and_signed_as_hyperliquids_sdk_does():
+    account = eth_account.Account.from_key(TEST_KEY)
+    action = hyperliquid.order_action("#1230", True, 0.54, 10.0, "Ioc", CLOID)
+    assert action == {"type": "order", "orders": [{"a": 100_001_230, "b": True, "p": "0.54", "s": "10", "r": False,
+                                                   "t": {"limit": {"tif": "Ioc"}}, "c": CLOID}], "grouping": "na"}
+    assert hyperliquid.signature(action, NONCE, account) == {"r": "0x3d7dcd0ba2e6c1a9868e866825883241f91fe1e59a23454e4c22689d4eba8476",
+                                                             "s": "0x3c163e50e659ffb9f41e0c2e815305f1848a28d5ad74728a71a9bb08df44e6b0", "v": 27}
+    assert hyperliquid.signature(action, NONCE, account, NONCE + 5000) == {
+        "r": "0xf0e24feeb5f722899b8537dec483d8ebf18f46cb14d56aebe5493ae03f2323d3",
+        "s": "0x36667a01097626d727cb2cb3b9d11eabbe26d8507ae67935c2645853ba407f4e", "v": 27}
+
+
+def test_a_cancel_by_our_id_on_the_no_side_is_signed_as_hyperliquids_sdk_does():
+    account = eth_account.Account.from_key(TEST_KEY)
+    action = hyperliquid.cancel_action(hyperliquid.side_coin("#1230", "no"), CLOID)
+    assert action == {"type": "cancelByCloid", "cancels": [{"asset": 100_001_231, "cloid": CLOID}]}
+    assert hyperliquid.signature(action, NONCE + 1, account) == {"r": "0xffa02e468ba996f0dfda44e00cc77cabe1e1d57a2da86aa09728ebdafea26e82",
+                                                                 "s": "0x195b6f187c481e3b262e7dd48a22df4d342a618b05a345fa91650122ed2c9", "v": 27}
+
+
+def test_prices_and_sizes_are_written_without_trailing_zeros_and_prices_to_five_figures():
+    assert [hyperliquid.wire(x) for x in (10.0, 0.5, 0.54073, 3.0)] == ["10", "0.5", "0.54073", "3"]
+    assert hyperliquid.price_wire(0.540734) == "0.54073" and hyperliquid.price_wire(0.05) == "0.05"
+    with pytest.raises(ValueError):
+        hyperliquid.wire(0.123456789)
+
+
+def test_nonces_never_repeat_within_a_millisecond():
+    a, b = hyperliquid.nonce(), hyperliquid.nonce()
+    assert b > a
+
+
+def test_an_order_goes_out_once_signed_and_its_answer_is_read(serve):
+    account = eth_account.Account.from_key(TEST_KEY)
+    filled = {"filled": {"totalSz": "7", "avgPx": "0.531", "oid": 77}}
+    answers = iter([{"status": "ok", "response": {"type": "order", "data": {"statuses": [filled]}}},
+                    {"status": "ok", "response": {"type": "order", "data": {"statuses": [
+                        {"error": "Order could not immediately match against any resting orders. asset=100001230"}]}}},
+                    {"status": "err", "response": "User or API Wallet 0x0 does not exist."}])
+    sent = serve(lambda request: httpx.Response(200, json=next(answers)))
+    first = hyperliquid.place("#1230", True, 0.54, 10.0, "Ioc", CLOID, account)
+    body = json.loads(sent[0].content)
+    assert str(sent[0].url) == hyperliquid.EXCHANGE_URL and body["action"]["orders"][0]["c"] == CLOID and body["vaultAddress"] is None
+    assert body["signature"] == hyperliquid.signature(body["action"], body["nonce"], account)
+    assert hyperliquid.answer(first, 10.0) == ("partial", 7.0, 0.531, 77, None)
+    assert hyperliquid.answer(hyperliquid.place("#1230", True, 0.54, 10.0, account=account), 10.0)[0] == "unfilled"
+    assert hyperliquid.answer(hyperliquid.place("#1230", True, 0.54, 10.0, account=account), 10.0)[0] == "error"
+    assert len(sent) == 3                                       # Each sent once, an error not retried.

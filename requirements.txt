@@ -2,6 +2,8 @@
 httpx
 websockets
 cryptography
+eth-account
+msgpack
 numpy
 scipy
 pytest

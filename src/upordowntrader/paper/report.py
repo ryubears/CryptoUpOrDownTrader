@@ -14,7 +14,7 @@ the edge stayed at the threshold or more. Then the contracts that stayed at it t
 an order sent at any moment of it could have had, of all of them and of those whose stretch outlasted an order's trip to
 the venue, see trader.ORDER_SECONDS, which an order could have reached, how often the peak came with the venue's own book
 change rather than the fair price's, by minutes left, and the largest. The profits are the fair price's expectation, not
-locked in.
+locked in, until the windows settle: then what each one's take actually made beside it, and its return on the capital.
 
 Run from src/ with:
     python3 -m upordowntrader.paper.report
@@ -146,6 +146,14 @@ def totals(group):
     return capital, profit, 100 * profit / capital, 100 * yearly / capital, minutes
 
 
+def actual(group):
+    """
+    What the settled ones of a group of opportunities actually made, for a table cell, or a dash before any settled.
+    """
+    settled = [o["actual_profit"] for o in group if o["actual_profit"] is not None]
+    return f"{sum(settled):+,.2f}" if settled else "-"
+
+
 def print_table(title, header, body, log=print, left=1):
     """
     Print a small aligned table with a title line, its first left columns aligned left and the rest right.
@@ -184,6 +192,16 @@ def report_opportunities(opportunities, label, log=print):
             f"{sum(o['min_edge_profit'] for o in reached):,.2f}$")
         log(f"  the peak came with the venue's own book change in {100 * np.mean([o['book_changed'] for o in rows]):.0f}%, the fair price's "
             f"move in the rest")
+        totals_at = [o["min_edge_total"] for o in rows if o["min_edge_total"] is not None]
+        if totals_at:
+            log(f"  at {cents} or more for {seconds(quantile(totals_at, 0.5))} in all at the median, every stretch counted, "
+                f"{seconds(quantile(totals_at, 0.9))} at the 90th percentile")
+        settled = [o for o in rows if o["actual_profit"] is not None]
+        if settled:
+            c, p, _, _, _ = totals(settled)
+            made = sum(o["actual_profit"] for o in settled)
+            log(f"  {len(settled):,} settled: they made {made:+,.2f}$ on {c:,.0f}$, {100 * made / c:+.2f}%, against {p:+,.2f}$, "
+                f"{100 * p / c:+.2f}%, expected")
         body = []
         for low, high in SPANS:
             group = [o for o in rows if low < o["close_time"] - o["peak_time"] <= high]
@@ -191,17 +209,17 @@ def report_opportunities(opportunities, label, log=print):
                 c, p, r, a, m = totals(group)
                 lasted = [o["min_edge_seconds"] for o in group]
                 body.append((f"{low // 60}-{high // 60} min left", f"{len(group):,}", seconds(quantile(lasted, 0.5)), seconds(max(lasted)),
-                             f"{c:,.0f}", f"{p:,.2f}", percent(r), percent(a), f"{m:,.1f}"))
+                             f"{c:,.0f}", f"{p:,.2f}", percent(r), percent(a), f"{m:,.1f}", actual(group)))
         print_table(f"{venue} opportunities by time left", ("left", "episodes", f"median {cents}+", f"longest {cents}+", "capital $", "profit $",
-                                                             "return %", "annual %", "avg min"), body, log)
+                                                             "return %", "annual %", "avg min", "actual $"), body, log)
         largest = []
         for o in rows[:LARGEST]:
             _, _, r, a, m = totals([o])
             largest.append((f"{o['ticker'][-22:]} {o['side']}", f"{100 * o['peak_edge']:.1f}", seconds(o["min_edge_seconds"]),
                             f"{o['take_size']:,.2f}".rstrip("0").rstrip("."), f"{o['take_capital']:,.0f}", f"{o['take_profit']:,.2f}",
-                            percent(a), f"{m:,.1f}"))
+                            percent(a), f"{m:,.1f}", actual([o]), percent(o["actual_return_pct"])))
         print_table(f"{venue} largest opportunities", ("market", "peak c", f"{cents}+ for", "size", "capital $", "profit $", "annual %",
-                                                        "minutes"), largest, log)
+                                                        "minutes", "actual $", "actual %"), largest, log)
 
 
 def utc_time(text):

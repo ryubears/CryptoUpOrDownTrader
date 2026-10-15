@@ -6,12 +6,12 @@ for the venues' reads and streams.
 import asyncio
 import pytest
 import time
-from upordowntrader.api import kalshi, polymarket_us
+from upordowntrader.api import hyperliquid, kalshi, polymarket_us
 from upordowntrader.db import database
 from upordowntrader.db.models import Market
 from upordowntrader.model import fair
 from upordowntrader.paper import report, run
-from upordowntrader.paper.trader import PaperTrader
+from upordowntrader.paper.trader import SETTLE_FEES, PaperTrader
 
 
 def order(venue="kalshi", ticker="K", close_time=1000, decided=500.0, side="yes", contracts=10.0, cost=0.4, edge=0.03, cause="coinbase",
@@ -32,7 +32,7 @@ def test_settling_pays_the_side_that_won_less_cost_and_fees_once(tmp_path):
               order(ticker="OPEN", close_time=9e9, decided=503.0))
     for o in stored:
         database.store_paper_order(conn, o)
-    assert database.unsettled_paper_markets(conn, 1000) == [("kalshi", "K")]
+    assert database.unsettled_markets(conn, 1000) == [("kalshi", "K")]
     assert database.settle_paper_orders(conn, "kalshi", "K", "yes") == 3
     assert database.settle_paper_orders(conn, "kalshi", "K", "yes") == 0
     profits = [o["profit"] for o in database.load_paper_orders(conn)[:3]]
@@ -88,6 +88,37 @@ def test_settling_reads_each_venues_markets_and_settles_their_orders(tmp_path, m
     assert logs == [f"paper kalshi K settled yes: 1 orders, 10 contracts, {10 * (0.6 - fair.fee(0.4)):+.2f}$"]
 
 
+def test_a_refresh_streams_hyperliquids_market_of_a_window_once_listed_beside_its_perp(tmp_path, monkeypatch):
+    close = (int(time.time()) // 900 + 1) * 900
+    monkeypatch.setattr(kalshi, "windows", lambda series, start, end: [window(close, 80_000.0), window(close + 900)])
+    monkeypatch.setattr(run, "read_tracking", lambda db_path, market, errors: 1e-9)
+    monkeypatch.setattr(run, "read_offset", lambda db_path, market: 12.5)
+    listed = [Market("hyperliquid", "#1230", "x", run.HYPERLIQUID_SERIES, close - 900, close, 80_062.0, None, None, None),
+              Market("hyperliquid", "#5550", "y", "recurring-BTC-1d", close - 900, close, 80_100.0, None, None, None)]   # Not a 15 minute one.
+    monkeypatch.setattr(hyperliquid, "windows", lambda: listed)
+    trader = PaperTrader(database.connect(tmp_path / "history.sqlite"), lambda line: None)
+    streams = {"kalshi": FakeStream(), "hyperliquid": FakeStream()}
+    streams["hyperliquid"].wanted = {"BTC", "#999"}
+    asyncio.run(run.refresh(trader, streams, tmp_path / "history.sqlite"))
+    assert streams["hyperliquid"].wanted == {"BTC", "#1230"} and trader.windows[close].names["hyperliquid"] == "#1230"
+    assert "hyperliquid" not in trader.windows[close + 900].names                  # Not listed yet.
+
+
+def test_settling_reads_hyperliquids_from_its_explorer_and_settles_the_opportunities_too_less_its_fee(tmp_path, monkeypatch):
+    conn = database.connect(tmp_path / "history.sqlite")
+    database.store_paper_order(conn, order(venue="hyperliquid", ticker="#1230", side="no", cost=0.45))
+    database.store_opportunities(conn, [opportunity(venue="hyperliquid", ticker="#1230", start=500.0, close_time=1000)])
+    monkeypatch.setattr(hyperliquid, "settlements", lambda: [Market("hyperliquid", "#1230", "x", "out-BTC-15m", 100, 1000, 1.0, None, "no", 1008.0)])
+    logs = []
+    asyncio.run(run.settle(conn, logs.append))
+    (o,) = database.load_paper_orders(conn)
+    fee = SETTLE_FEES["hyperliquid"]
+    assert o["profit"] == pytest.approx(10 * (1 - fee) - 10 * 0.45 - o["fees"])
+    (opp,) = database.load_opportunities(conn)
+    assert (opp["result"], opp["actual_profit"]) == ("no", -50.0)       # Its take bought Yes, 100 contracts for 50$.
+    assert logs[0].startswith("paper hyperliquid #1230 settled no: 1 orders, 10 contracts")
+
+
 def test_the_report_gives_each_venue_by_edge_time_left_what_brought_the_decision_and_day(tmp_path):
     causes = {1: "kalshi", 2: "coinbase", 3: "time", 4: None}
     orders = [{**order(close_time=1000 * k, decided=1000 * k - 400.0, edge=0.02 + 0.01 * k, cause=causes[k]), "result": "yes" if k % 2 else "no"}
@@ -124,7 +155,8 @@ def opportunity(venue="polymarket_us", start=1000.0, take=(100.0, 50.0, 2.0), la
             "peak_profit": 2.2, "book_changed": book_changed, "days_held": days, "return_pct": 5.6, "annual_pct": 5.6 * 365 / days,
             "min_edge": 0.02, "min_edge_seconds": lasted if take else None, "min_edge_size": 40.0 if take else None,
             "min_edge_capital": 20.0 if take else None, "min_edge_profit": 0.8 if take else None, "take_size": size, "take_capital": capital,
-            "take_profit": profit, **more}
+            "take_profit": profit, "take_return_pct": 100 * profit / capital if take else None, "min_edge_total": lasted if take else None,
+            "result": None, "actual_profit": None, "actual_return_pct": None, **more}
 
 
 def test_the_opportunities_report_gives_what_one_order_each_could_have_taken_and_how_long_the_edge_lasted(tmp_path):
@@ -145,6 +177,11 @@ def test_the_opportunities_report_gives_what_one_order_each_could_have_taken_and
     assert "80 contracts stayed, 40$ expecting 1.60$" in text and "own book change in 50%" in text
     assert "2 of the stretches outlasted an order's trip to polymarket_us, 136 ms: through them 80 contracts stayed" in text
     assert any(line.strip().startswith("10-15 min left") for line in lines) and any(line.strip().startswith("5-10 min left") for line in lines)
+    database.settle_opportunities(conn, "polymarket_us", "P", "yes")
+    lines = []
+    report.report_opportunities(database.load_opportunities(conn), "since the first", lines.append)
+    assert "  2 settled: they made +55.00$ on 55$, +100.00%, against +2.50$, +4.55%, expected" in lines
+    assert "  at 2c or more for 2.000s in all at the median, every stretch counted, 2.000s at the 90th percentile" in lines
 
 
 def test_only_a_stretch_outlasting_an_orders_trip_counts_as_one_an_order_could_have_reached():
@@ -160,7 +197,7 @@ def test_the_status_line_counts_the_opportunities_one_order_could_have_taken_tod
     database.store_opportunities(conn, [opportunity(start=today), opportunity(start=today + 0.1, take=None),
                                         opportunity(start=now - 2 * 86400)])
     line = run.status(conn, PaperTrader(conn))
-    assert line.endswith("; 1 opportunities at 2c or more, 50$ in one order each expecting +2.00$")
+    assert line.endswith("; 1 opportunities at their venue's threshold or more, 50$ in one order each expecting +2.00$")
 
 
 def test_a_time_to_report_from_is_read_in_utc_unless_it_says_otherwise():

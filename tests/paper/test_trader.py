@@ -166,7 +166,7 @@ def test_no_order_in_the_last_five_minutes_or_on_a_book_whose_stream_is_down(tmp
     quote(t, clock, 80_110.0)
     quote(t, clock, 80_050.0)
     t.feeds = {}
-    step(t, clock, CLOSE - paper.MIN_LEFT)
+    step(t, clock, CLOSE - paper.MIN_LEFT["kalshi"])
     quote(t, clock, 80_110.0)
     assert not t.pending and not orders(t)
 
@@ -224,6 +224,57 @@ def test_each_order_notes_what_brought_its_decision(tmp_path):
                                                              ("kalshi", "time")]
 
 
+def listed(t, ticker="#1230"):
+    """
+    Hyperliquid lists the window, as paper/run.py passes its market list on.
+    """
+    t.name_windows("hyperliquid", [Market("hyperliquid", ticker, "out-BTC-15m-x", "out-BTC-15m", OPEN, CLOSE, STRIKE + 60, None, None, None)])
+
+
+def test_hyperliquid_is_traded_against_kalshis_mid_alone_at_its_own_threshold(tmp_path):
+    t, clock, _ = setup(tmp_path, venues=("kalshi", "hyperliquid"))
+    listed(t)
+    t.on_book("kalshi", "K", [[0.49, 10.0]], [[0.51, 10.0]], clock.now)     # Kalshi's mid is 50c, and so is the model at the strike.
+    t.on_book("hyperliquid", "#1230", [[0.40, 20.0]], [[0.48, 50.0]], clock.now)
+    assert not t.pending                                        # Yes at 48c is 2c under Kalshi's mid: not Hyperliquid's 3c.
+    quote(t, clock, 80_110.0)                                   # The model says Up is likely, which Hyperliquid's fair price leaves out,
+    assert [o["venue"] for o in t.pending] == ["kalshi"]        # though Kalshi's own rule trades on it.
+    t.on_book("hyperliquid", "#1230", [[0.40, 20.0]], [[0.46, 5.0], [0.47, 30.0], [0.48, 50.0]], clock.now)
+    (order,) = [o for o in t.pending if o["venue"] == "hyperliquid"]
+    assert (order["side"], order["limit_price"], order["offered"], order["fair"]) == ("yes", 0.47, 35.0, 0.5)
+    assert order["edge"] == pytest.approx(0.04) and order["cause"] == "hyperliquid"
+    step(t, clock, clock.now + 1)
+    (stored,) = [o for o in orders(t) if o["venue"] == "hyperliquid"]
+    assert (stored["contracts"], stored["cost"], stored["fees"]) == (10.0, pytest.approx(0.465), 0.0)       # 5 at 46c, 5 at 47c.
+    assert stored["arrived"] == pytest.approx(order["decided"] + paper.ORDER_SECONDS["hyperliquid"])
+
+
+def test_hyperliquid_trades_until_its_last_minute_after_kalshi_has_stopped_and_not_without_a_tight_kalshi_book(tmp_path):
+    t, clock, _ = setup(tmp_path, venues=("kalshi", "hyperliquid"))
+    listed(t)
+    step(t, clock, CLOSE - 200)                                 # Inside Kalshi's last 5 minutes.
+    t.on_book("kalshi", "K", [[0.44, 10.0]], [[0.45, 10.0]], clock.now)     # Yes at 45c would be an edge for Kalshi's rule.
+    t.on_book("hyperliquid", "#1230", [[0.30, 10.0]], [[0.40, 10.0]], clock.now)
+    assert [o["venue"] for o in t.pending] == ["hyperliquid"]
+    t.on_book("kalshi", "K", [[0.30, 10.0]], [[0.45, 10.0]], clock.now)     # Kalshi's spread past MAX_SPREAD: no fair price for Hyperliquid,
+    assert ("hyperliquid", "#1230", "yes") not in t.opportunities          # so its opportunity ends.
+    step(t, clock, CLOSE - paper.MIN_LEFT["hyperliquid"] + 1)
+    t.on_book("kalshi", "K", [[0.44, 10.0]], [[0.45, 10.0]], clock.now)
+    t.on_book("hyperliquid", "#1230", [[0.30, 10.0]], [[0.39, 10.0]], clock.now)
+    assert len([o for o in orders(t) if o["venue"] == "hyperliquid"]) == 1 and not t.pending     # None in its last minute.
+
+
+def test_an_opportunity_counts_every_stretch_at_the_threshold_and_the_takes_expected_return():
+    moment = {"time": 100.0, "edge": 0.03, "price": 0.5, "fair": 0.53, "size": 10.0, "capital": 5.0, "profit": 0.3, "book_changed": False}
+    o = paper.Opportunity("hyperliquid", "#1230", CLOSE, "yes", 100.0, moment)
+    o.see(moment, (10.0, 5.0, 0.3), 100.0)
+    o.see({**moment, "edge": 0.01}, None, 101.5)                # Under the threshold after 1.5 s,
+    o.see(moment, (4.0, 2.0, 0.12), 103.0)                      # at it again for 1 s more.
+    row = o.row(104.0, 0.03)
+    assert (row["min_edge_seconds"], row["min_edge_total"], row["take_size"]) == (1.5, 2.5, 10.0)
+    assert row["take_return_pct"] == pytest.approx(6.0) and row["days_held"] == pytest.approx((CLOSE + 10 - 100.0) / 86400)
+
+
 def test_a_closed_window_is_forgotten_with_its_books(tmp_path):
     t, clock, _ = setup(tmp_path)
     t.on_book("kalshi", "K", BIDS, ASKS, clock.now)
@@ -273,7 +324,7 @@ def test_an_opportunity_keeps_its_peak_its_longest_stretch_at_the_threshold_and_
     (o,) = opportunities(t)
     assert (o["venue"], o["ticker"], o["side"], o["close_time"]) == ("kalshi", "K", "yes", CLOSE)
     assert (o["start_time"], o["end_time"], o["seconds"], o["peak_time"], o["book_changed"]) == (start, end, 2.0, start, 0)
-    assert (o["peak_price"], o["peak_size"], o["min_edge"]) == (0.52, 50.0, paper.THRESHOLD)
+    assert (o["peak_price"], o["peak_size"], o["min_edge"]) == (0.52, 50.0, paper.THRESHOLDS["kalshi"])
     fee = fair.fee(0.52)
     assert o["peak_capital"] == pytest.approx(30 * (0.52 + fee) + 20 * (0.54 + fair.fee(0.54)))
     assert o["peak_profit"] == pytest.approx(30 * o["peak_edge"] + 20 * fair.edge(o["peak_fair"], 0.54))
@@ -289,10 +340,10 @@ def test_an_edge_under_the_threshold_is_an_opportunity_without_a_take_and_ends_w
     t, clock, _ = setup(tmp_path)
     t.on_book("kalshi", "K", [[0.40, 10.0]], [[0.48, 40.0]], clock.now)    # At a chance of a half, Yes at 48 cents makes 0.25c.
     assert not t.pending
-    step(t, clock, CLOSE - paper.MIN_LEFT)
+    step(t, clock, CLOSE - paper.MIN_LEFT["kalshi"])
     (o,) = opportunities(t)
-    assert o["end_time"] == CLOSE - paper.MIN_LEFT and o["book_changed"] == 1     # The peak came with Kalshi's own book.
-    assert o["peak_size"] == 40.0 and o["peak_profit"] == pytest.approx(40 * o["peak_edge"]) and 0 < o["peak_edge"] < paper.THRESHOLD
+    assert o["end_time"] == CLOSE - paper.MIN_LEFT["kalshi"] and o["book_changed"] == 1     # The peak came with Kalshi's own book.
+    assert o["peak_size"] == 40.0 and o["peak_profit"] == pytest.approx(40 * o["peak_edge"]) and 0 < o["peak_edge"] < paper.THRESHOLDS["kalshi"]
     assert (o["min_edge_seconds"], o["min_edge_size"], o["take_size"], o["take_profit"]) == (None, None, None, None)
 
 

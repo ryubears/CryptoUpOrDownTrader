@@ -1,7 +1,7 @@
 """
 Paper trade the windows live: price Up as the replay does, from what reaches us as it comes, and decide pretend orders on
-Kalshi and Polymarket US under a rule fixed before the first one, each filled against the book its venue had when the
-order would have reached it.
+Kalshi, Polymarket US, and Hyperliquid under rules fixed before the first one, each filled against the book its venue had
+when the order would have reached it.
 
 The rule, set on 2026-10-13 from the benchmark and the replay, where only the blend kept an edge after the fee, and only
 before the last 5 minutes, whose moves the market sees coming and the model does not:
@@ -9,13 +9,21 @@ before the last 5 minutes, whose moves the market sees coming and the model does
     fair price  the model recalibrated and blended with Kalshi's mid, see model/fair.py, fitted on the TRAIN_DAYS of settled
                 windows before, see benchmark.fit_before(), and fitted again daily by paper/run.py
     when        from the open until MIN_LEFT seconds before the close
-    edge        THRESHOLD a contract or more after the venue's taker fee at the best price, on either side, buying Yes below
+    edge        THRESHOLDS a contract or more after the venue's taker fee at the best price, on either side, buying Yes below
                 the fair price or No above it, on Kalshi or Polymarket US, which trade the same bet
     episodes    once per venue and side until its edge falls below the threshold, as the replay takes them
     size        an immediate or cancel limit for up to CONTRACTS contracts at the worst price whose edge reaches the threshold,
                 and from 2026-10-14 no more than WINDOW_CONTRACTS contracts of a window on a venue, both sides together, the
                 orders on their way counted at their size: without it, a model at odds with the market for a whole window
                 bought the same side again each time its edge came back, 1,346 contracts of the 22:15 window of 2026-10-13
+
+Hyperliquid's 15 minute windows, the same bet on its perp's mark, from 2026-10-15 under a rule of their own, set from a
+replay of its recorded books against Kalshi's over 265 windows, where buying its quotes Kalshi's mid had moved past made
++3.6 +/- 2.3 cents a contract at 3 cents, its book changing every 7 seconds or so: the fair price is Kalshi's mid alone,
+both sides quoted within MAX_SPREAD, without the model; orders from its listing, 15 to 25 seconds into the window, until
+MIN_LEFT seconds before the close; an edge of THRESHOLDS; the rest as above. Its window's market is found in its list, see
+name_windows(). Opening a position there is free, and the fee it may take at settlement, see SETTLE_FEES, a fraction of a
+cent, is left out of the edge and taken from the profit as the window settles.
 
 An order reaches its venue ORDER_SECONDS after it is decided, the 90th percentile of PredictionArbitrageTrader's live
 orders from the same AWS region, and fills against the newest book the venue made by then: the trader waits for a book
@@ -49,27 +57,35 @@ import numpy as np
 import time
 from collections import deque
 from dataclasses import dataclass
-from upordowntrader.api import polymarket_us
+from upordowntrader.api import hyperliquid, polymarket_us
 from upordowntrader.backtest import replay
 from upordowntrader.db import database
 from upordowntrader.db.models import Market
 from upordowntrader.model import fair, pricing
 
-THRESHOLD = 0.02            # Edge after the fee, in dollars a contract, an order needs: the benchmark's best before the last 5 minutes.
+# Edge after the fee, in dollars a contract, an order needs: the benchmark's best before the last 5 minutes on Kalshi and
+# Polymarket US, and on Hyperliquid what its replay against Kalshi's mid kept the most of.
+THRESHOLDS = {"kalshi": 0.02, "polymarket_us": 0.02, "hyperliquid": 0.03}
 CONTRACTS = 10              # The most contracts an order takes.
 WINDOW_CONTRACTS = 50       # The most contracts the trader buys of one window on one venue, both sides together.
-MIN_LEFT = 300              # Seconds before the close the last order may be decided.
+MIN_LEFT = {"kalshi": 300, "polymarket_us": 300, "hyperliquid": 60}     # Seconds before the close the last order may be decided.
+MAX_SPREAD = 0.10           # The widest Kalshi spread whose mid Hyperliquid is traded against.
 DEPTH = 10                  # Levels a side the trader keeps of each book.
-VENUES = ("kalshi", "polymarket_us")
-FEE_RATES = {"kalshi": fair.FEE_RATE, "polymarket_us": polymarket_us.TAKER_FEE_RATE}
-ORDER_SECONDS = {"kalshi": 0.016, "polymarket_us": 0.136}   # From an order's decision to its venue's book.
-FEED_SECONDS = {"kalshi": 0.1, "polymarket_us": 0.3}        # The longest a venue's book takes to reach us, at the 90th percentile.
+VENUES = ("kalshi", "polymarket_us", "hyperliquid")
+FEE_RATES = {"kalshi": fair.FEE_RATE, "polymarket_us": polymarket_us.TAKER_FEE_RATE, "hyperliquid": 0.0}     # Of p(1 - p), on buying.
+SETTLE_FEES = {"hyperliquid": hyperliquid.SETTLE_FEE_RATE}  # Of a winning contract's dollar, as it settles.
+ORDER_SECONDS = {"kalshi": 0.016, "polymarket_us": 0.136, "hyperliquid": 0.4}   # From an order's decision to its venue's book, by
+                                                                                # its clock: Hyperliquid's as its replay took it.
+FEED_SECONDS = {"kalshi": 0.1, "polymarket_us": 0.3, "hyperliquid": 0.6}    # The longest a venue's book takes to reach us, at the
+                                                                            # 90th percentile.
 TAPE_SECONDS = 10           # Seconds of each book's changes kept, for the book an order meets.
 READING_SECONDS = 1800      # Seconds of the price's readings kept, back past the open of the window trading.
 CATCH_UP = 10               # The most seconds without a price a reading is filled back over. Longer, the process stalled.
 WINDOW_KEEP = 60            # Seconds after its close a window is forgotten, with its books.
-PAYOUT_SECONDS = {"kalshi": 5, "polymarket_us": 10}     # Seconds after its close a window pays: Kalshi settled one 3.7 s after on
-                                                        # 2026-10-10, and Polymarket US resolved one 10 s after on 2026-10-13.
+PAYOUT_SECONDS = {"kalshi": 5, "polymarket_us": 10, "hyperliquid": 10}     # Seconds after its close a window pays: Kalshi settled
+                                                                        # one 3.7 s after on 2026-10-10, Polymarket US one 10 s
+                                                                        # after on 2026-10-13, and Hyperliquid settles about 8 s
+                                                                        # after.
 LOG_PROFIT_DOLLARS = 10     # Opportunities one order could have taken this much expected profit from are logged as they end.
 DAY = 86400
 
@@ -103,15 +119,18 @@ class Opportunity:
     since: float | None = None      # When the current stretch at the threshold or more began, or None outside one.
     least: tuple = (0.0, 0.0, 0.0)  # The fewest contracts at the threshold or more so far in the stretch, as take.
     longest: tuple | None = None    # The longest stretch so far, (seconds, contracts, capital, profit), or None before any.
+    total: float | None = None      # Seconds at the threshold or more in all, over every stretch ended, or None before any.
 
     def end_stretch(self, now):
         """
-        Close the current stretch at the threshold or more at now, keeping it when it is the longest.
+        Close the current stretch at the threshold or more at now, keeping it when it is the longest, and adding it to the
+        total.
         """
         if self.since is None:
             return
         if self.longest is None or now - self.since > self.longest[0]:
             self.longest = (now - self.since, *self.least)
+        self.total = (self.total or 0.0) + now - self.since
         self.since = None
 
     def see(self, moment, at_threshold, now):
@@ -146,7 +165,8 @@ class Opportunity:
                 "peak_fair": peak["fair"], "peak_size": peak["size"], "peak_capital": peak["capital"], "peak_profit": peak["profit"],
                 "book_changed": int(peak["book_changed"]), "days_held": days, "return_pct": return_pct, "annual_pct": return_pct * 365 / days,
                 "min_edge": min_edge, "min_edge_seconds": seconds, "min_edge_size": size, "min_edge_capital": capital,
-                "min_edge_profit": profit, "take_size": take_size, "take_capital": take_capital, "take_profit": take_profit}
+                "min_edge_profit": profit, "take_size": take_size, "take_capital": take_capital, "take_profit": take_profit,
+                "take_return_pct": 100 * take_profit / take_capital if take_capital else None, "min_edge_total": self.total}
 
 
 # BOOKS
@@ -239,12 +259,12 @@ class PaperTrader:
     docstring. paper/run.py feeds it the windows, the variance forecast, and the fit, and settles its orders.
     """
 
-    def __init__(self, conn, log=print, clock=time.time, threshold=THRESHOLD, contracts=CONTRACTS, window_contracts=WINDOW_CONTRACTS,
+    def __init__(self, conn, log=print, clock=time.time, thresholds=THRESHOLDS, contracts=CONTRACTS, window_contracts=WINDOW_CONTRACTS,
                  depth=DEPTH):
         self.conn = conn
         self.log = log
         self.clock = clock
-        self.threshold = threshold
+        self.thresholds = dict(thresholds)      # Each venue's edge an order needs.
         self.contracts = contracts
         self.window_contracts = window_contracts
         self.depth = depth
@@ -371,9 +391,21 @@ class PaperTrader:
             w = self.windows.get(m.close_time)
             if w is None:
                 names = {"kalshi": m.ticker, "polymarket_us": polymarket_us.slug(m.open_time)}
-                self.windows[m.close_time] = Window(m, {venue: names[venue] for venue in self.venues})
+                self.windows[m.close_time] = Window(m, {venue: names[venue] for venue in self.venues if venue in names})
             elif m.strike is not None:
                 w.market = m
+
+    def name_windows(self, venue, markets):
+        """
+        Give the windows priced their market on a venue whose names the time does not tell, Hyperliquid, from the
+        markets it lists, Markets, each by its close time.
+        """
+        if venue not in self.venues:
+            return
+        for m in markets:
+            w = self.windows.get(m.close_time)
+            if w is not None:
+                w.names[venue] = m.ticker
 
     def opened(self, now):
         """
@@ -414,10 +446,11 @@ class PaperTrader:
     def price(self, now):
         """
         The window trading and what its fair price was made from at now, {price, model, mid, fair}, or None when it cannot
-        be priced: no window with all it needs, no fit or variance forecast yet, MIN_LEFT or less left, or no Kalshi book.
+        be priced: no window with all it needs, no fit or variance forecast yet, no more left than any venue trades to, see
+        MIN_LEFT, or no Kalshi book. kalshi_mid is Kalshi's mid when both its sides are quoted within MAX_SPREAD, else None.
         """
         w = self.trading(now)
-        if w is None or self.fit is None or self.variance is None or w.market.close_time - now <= MIN_LEFT:
+        if w is None or self.fit is None or self.variance is None or w.market.close_time - now <= min(MIN_LEFT[v] for v in self.venues):
             return None
         kalshi = self.books.get(("kalshi", w.names["kalshi"]))
         mid = book_mid(kalshi) if kalshi is not None and self.up("kalshi") else None
@@ -427,7 +460,17 @@ class PaperTrader:
         model = self.model_chance(w, price, now)
         if not math.isfinite(model):
             return None
-        return w, {"price": price, "model": model, "mid": mid, "fair": float(fair.blended(mid, model, w.market.close_time - now, self.fit))}
+        bids, asks = kalshi
+        strict = (bids[0][0] + asks[0][0]) / 2 if bids and asks and asks[0][0] - bids[0][0] <= MAX_SPREAD else None
+        return w, {"price": price, "model": model, "mid": mid, "fair": float(fair.blended(mid, model, w.market.close_time - now, self.fit)),
+                   "kalshi_mid": strict}
+
+    def up_chance(self, venue, seen):
+        """
+        The chance of Up a venue is traded against, from what price() saw: the fair price, or Kalshi's mid alone on
+        Hyperliquid, None when there is none.
+        """
+        return seen["kalshi_mid"] if venue == "hyperliquid" else seen["fair"]
 
     def evaluate(self, now, changed=None, source=None):
         """
@@ -446,12 +489,13 @@ class PaperTrader:
             cause = changed[0] if changed in w.names.items() else "other"
         for venue, ticker in w.names.items():
             book = self.books.get((venue, ticker))
-            if book is None or not self.up(venue) or (venue, ticker) in self.halted:
+            up = self.up_chance(venue, seen)
+            if book is None or up is None or not self.up(venue) or (venue, ticker) in self.halted or w.market.close_time - now <= MIN_LEFT[venue]:
                 self.end_opportunities(now, (venue, ticker))
                 continue
             for side in ("yes", "no"):
-                self.follow(now, w, venue, ticker, book, side, seen["fair"] if side == "yes" else 1 - seen["fair"], changed == (venue, ticker))
-                self.consider(now, w, venue, ticker, book, side, seen, cause)
+                self.follow(now, w, venue, ticker, book, side, up if side == "yes" else 1 - up, changed == (venue, ticker))
+                self.consider(now, w, venue, ticker, book, side, seen, up, cause)
 
     # OPPORTUNITIES
 
@@ -473,7 +517,8 @@ class PaperTrader:
         o = self.opportunities.get(key)
         if o is None:
             o = self.opportunities[key] = Opportunity(venue, ticker, w.market.close_time, side, now, moment)
-        o.see(moment, depth(levels, chance, rate, self.threshold) if edge >= self.threshold else None, now)
+        least = self.thresholds[venue]
+        o.see(moment, depth(levels, chance, rate, least) if edge >= least else None, now)
 
     def end_opportunity(self, key, now):
         """
@@ -483,11 +528,11 @@ class PaperTrader:
         o = self.opportunities.pop(key, None)
         if o is None:
             return
-        row = o.row(now, self.threshold)
+        row = o.row(now, self.thresholds[o.venue])
         self.finished.append(row)
         if (row["take_profit"] or 0) >= LOG_PROFIT_DOLLARS:
             self.log(f"opportunity {o.venue} {o.side} {o.ticker}: {100 * row['peak_edge']:.1f}c x {row['peak_size']:,.0f} = "
-                     f"{row['peak_profit']:,.2f}$ expected, lasted {row['seconds']:.1f}s, {100 * self.threshold:.0f}c or more for "
+                     f"{row['peak_profit']:,.2f}$ expected, lasted {row['seconds']:.1f}s, {100 * row['min_edge']:.0f}c or more for "
                      f"{row['min_edge_seconds']:.1f}s with {row['min_edge_size']:,.0f} contracts throughout; one order could have taken "
                      f"{row['take_size']:,.0f} for {row['take_capital']:,.2f}$, expecting {row['take_profit']:,.2f}$")
 
@@ -508,28 +553,28 @@ class PaperTrader:
 
     # ORDERS
 
-    def consider(self, now, w, venue, ticker, book, side, seen, cause):
+    def consider(self, now, w, venue, ticker, book, side, seen, up, cause):
         """
-        Decide an order on one side of a venue's market when its edge calls for one, see the module's docstring. cause says
-        what brought the pricing, see evaluate().
+        Decide an order on one side of a venue's market when its edge calls for one, see the module's docstring: up is the
+        chance of Up the venue is traded against, see up_chance(), and cause says what brought the pricing, see evaluate().
         """
         key = (venue, ticker, side)
-        chance = seen["fair"] if side == "yes" else 1 - seen["fair"]
-        rate = FEE_RATES[venue]
+        chance = up if side == "yes" else 1 - up
+        rate, least = FEE_RATES[venue], self.thresholds[venue]
         levels = side_levels(book, side)
-        if not levels or fair.edge(chance, levels[0][0], rate) < self.threshold:
+        if not levels or fair.edge(chance, levels[0][0], rate) < least:
             self.armed[key] = True          # The next reach is a new episode.
             return
         if not self.armed.get(key, True) or now < self.busy.get(key, -math.inf):
             return
         room = self.room(venue, ticker)
-        offered = replay.untaken([(p, c) for p, c in levels if fair.edge(chance, p, rate) >= self.threshold], self.taken.get(key, {}))
+        offered = replay.untaken([(p, c) for p, c in levels if fair.edge(chance, p, rate) >= least], self.taken.get(key, {}))
         if room <= 1e-9 or not offered:
             return
         self.armed[key] = False
         arrived = now + ORDER_SECONDS[venue]
         self.busy[key] = arrived + FEED_SECONDS[venue]
-        self.pending.append({"venue": venue, "ticker": ticker, "close_time": w.market.close_time, "decided": now, "side": side, **seen,
+        self.pending.append({"venue": venue, "ticker": ticker, "close_time": w.market.close_time, "decided": now, "side": side, **seen, "fair": up,
                              "edge": fair.edge(chance, levels[0][0], rate), "limit_price": max(p for p, _ in offered),
                              "offered": sum(c for _, c in offered), "arrived": arrived, "cause": cause, "chance": chance,
                              "size": min(self.contracts, room)})
