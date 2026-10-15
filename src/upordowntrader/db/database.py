@@ -29,13 +29,15 @@ from upordowntrader.db.models import Market
 DB_PATH = DATA_DIR / "history.sqlite"
 SCHEMA = Path(__file__).with_name("schema.sql")
 BAR_COLUMNS = ("time", "open", "high", "low", "close", "volume")    # The columns read_bars() gives, in order.
+ADDED_COLUMNS = (("paper_orders", "cause", "TEXT"),)    # Columns schema.sql gained after its table had rows, as (table, column, type).
 
 
 # CONNECTION
 
 def connect(db_path=None):
     """
-    Open the database, creating the file and tables if needed. Uses DB_PATH unless a path is given.
+    Open the database, creating the file and tables if needed, and adding the columns a table made before them lacks. Uses
+    DB_PATH unless a path is given.
     """
     db_path = Path(db_path or DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,7 +45,19 @@ def connect(db_path=None):
     # Write ahead logging lets a calibration read while a download or the recorder writes.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA.read_text())
+    add_columns(conn)
     return conn
+
+
+def add_columns(conn):
+    """
+    Add each of ADDED_COLUMNS its table lacks, as schema.sql's CREATE TABLE IF NOT EXISTS leaves a table made before as it
+    was.
+    """
+    for table, column, kind in ADDED_COLUMNS:
+        if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+            with conn:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
 
 # SERIES
@@ -198,7 +212,7 @@ def insert_gap(conn, gap):
 # PAPER ORDERS
 
 PAPER_COLUMNS = ("venue", "ticker", "close_time", "decided", "side", "price", "model", "mid", "fair", "edge", "limit_price", "offered",
-                 "arrived", "contracts", "cost", "best", "fees", "expected", "result", "profit")
+                 "arrived", "contracts", "cost", "best", "fees", "expected", "result", "profit", "cause")
 
 
 def store_paper_order(conn, order):

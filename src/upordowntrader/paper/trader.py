@@ -21,7 +21,9 @@ An order reaches its venue ORDER_SECONDS after it is decided, the 90th percentil
 orders from the same AWS region, and fills against the newest book the venue made by then: the trader waits for a book
 the venue made later, which shows every change before has reached us, or FEED_SECONDS. A side sends no order while its
 last waits so. A paper order leaves the venue's book as it was, so the contracts it took are kept off later orders until
-the book shows fewer, as the replay does, see replay.still_resting().
+the book shows fewer, as the replay does, see replay.still_resting(). Each order notes what brought its decision: a change
+of its venue's own book, of Kalshi's, whose mid the fair price is blended with, an exchange's quote, or the once a second
+pricing as time alone moves the model, see paper_orders.cause in schema.sql.
 
 Beside the orders, the trader records every opportunity, as PredictionArbitrageTrader does: each stretch where buying one
 side of a venue's market had a positive edge after the fee, at the best price by the fair price, while the window could
@@ -305,7 +307,7 @@ class PaperTrader:
             self.mids[source] = (bids[0][0] + asks[0][0]) / 2
         else:
             self.mids.pop(source, None)
-        self.evaluate(now)
+        self.evaluate(now, source=source)
 
     def on_book(self, venue, ticker, bids, asks, sent=None):
         """
@@ -427,10 +429,11 @@ class PaperTrader:
             return None
         return w, {"price": price, "model": model, "mid": mid, "fair": float(fair.blended(mid, model, w.market.close_time - now, self.fit))}
 
-    def evaluate(self, now, changed=None):
+    def evaluate(self, now, changed=None, source=None):
         """
         Fill the orders whose books are known, then price the window trading, follow its opportunities, and decide the
-        orders its edges call for. changed is the (venue, ticker) whose book change brought the pricing, or None.
+        orders its edges call for. changed is the (venue, ticker) whose book change brought the pricing, source the exchange
+        whose quote did, or neither for the once a second pricing.
         """
         self.fill_due(now)
         priced = self.price(now)
@@ -438,6 +441,9 @@ class PaperTrader:
             self.end_opportunities(now)
             return
         w, seen = priced
+        cause = source or "time"
+        if changed is not None:
+            cause = changed[0] if changed in w.names.items() else "other"
         for venue, ticker in w.names.items():
             book = self.books.get((venue, ticker))
             if book is None or not self.up(venue) or (venue, ticker) in self.halted:
@@ -445,7 +451,7 @@ class PaperTrader:
                 continue
             for side in ("yes", "no"):
                 self.follow(now, w, venue, ticker, book, side, seen["fair"] if side == "yes" else 1 - seen["fair"], changed == (venue, ticker))
-                self.consider(now, w, venue, ticker, book, side, seen)
+                self.consider(now, w, venue, ticker, book, side, seen, cause)
 
     # OPPORTUNITIES
 
@@ -502,9 +508,10 @@ class PaperTrader:
 
     # ORDERS
 
-    def consider(self, now, w, venue, ticker, book, side, seen):
+    def consider(self, now, w, venue, ticker, book, side, seen, cause):
         """
-        Decide an order on one side of a venue's market when its edge calls for one, see the module's docstring.
+        Decide an order on one side of a venue's market when its edge calls for one, see the module's docstring. cause says
+        what brought the pricing, see evaluate().
         """
         key = (venue, ticker, side)
         chance = seen["fair"] if side == "yes" else 1 - seen["fair"]
@@ -524,7 +531,8 @@ class PaperTrader:
         self.busy[key] = arrived + FEED_SECONDS[venue]
         self.pending.append({"venue": venue, "ticker": ticker, "close_time": w.market.close_time, "decided": now, "side": side, **seen,
                              "edge": fair.edge(chance, levels[0][0], rate), "limit_price": max(p for p, _ in offered),
-                             "offered": sum(c for _, c in offered), "arrived": arrived, "chance": chance, "size": min(self.contracts, room)})
+                             "offered": sum(c for _, c in offered), "arrived": arrived, "cause": cause, "chance": chance,
+                             "size": min(self.contracts, room)})
 
     def room(self, venue, ticker):
         """

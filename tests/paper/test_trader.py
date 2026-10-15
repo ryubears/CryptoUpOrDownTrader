@@ -203,6 +203,27 @@ def test_polymarket_is_traded_on_its_own_book_with_its_own_fee_at_the_fair_price
     assert order["mid"] == pytest.approx(0.80)
 
 
+def test_each_order_notes_what_brought_its_decision(tmp_path):
+    t, clock, _ = setup(tmp_path, venues=("kalshi", "polymarket_us"))
+    name = polymarket_us.slug(OPEN)
+    quote(t, clock, 80_110.0)                                                   # Up is likely,
+    t.on_book("polymarket_us", name, [[0.48, 10.0]], [[0.52, 5.0]], clock.now)  # but nothing is priced without Kalshi's book,
+    t.on_book("kalshi", "K", [[0.75, 10.0]], [[0.85, 10.0]], clock.now)         # so its coming brings Polymarket US's order.
+    clock.now += 1
+    t.on_book("kalshi", "K", BIDS, ASKS, clock.now)                             # Kalshi's own book brings an edge on Yes.
+    step(t, clock, clock.now + 1)
+    quote(t, clock, 80_050.0)                                   # At the strike the episodes end,
+    quote(t, clock, 80_110.0)                                   # and Coinbase's quote brings Kalshi's back.
+    step(t, clock, clock.now + 1)
+    quote(t, clock, 80_050.0)
+    t.fit = None
+    quote(t, clock, 80_110.0)                                   # The edge comes back while the fair price cannot be made,
+    t.fit = MODEL_ONLY
+    step(t, clock, clock.now + 2)                               # so the next second's pricing brings the order.
+    assert [(o["venue"], o["cause"]) for o in orders(t)] == [("polymarket_us", "kalshi"), ("kalshi", "kalshi"), ("kalshi", "coinbase"),
+                                                             ("kalshi", "time")]
+
+
 def test_a_closed_window_is_forgotten_with_its_books(tmp_path):
     t, clock, _ = setup(tmp_path)
     t.on_book("kalshi", "K", BIDS, ASKS, clock.now)

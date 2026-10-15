@@ -1,7 +1,7 @@
 """
 Report what the paper orders made, see paper/trader.py, as the replay reports its trades: by venue, with two standard
 errors that count each window once, as its orders share its outcome, then by the edge they were decided at, by the
-minutes left, and day by day.
+minutes left, by what brought the decision, see cause(), and day by day.
 
     expected    the fair price's edge after the fee on the contracts filled, what they make on average if it is right
     realized    what they made, from how the windows settled
@@ -34,6 +34,7 @@ from upordowntrader.paper.trader import FEE_RATES, ORDER_SECONDS, VENUES
 
 EDGES = ((0.02, 0.03), (0.03, 0.05), (0.05, 1.0))       # Edges at the decision the report is broken into, in dollars a contract.
 SPANS = ((600, 900), (300, 600))                        # Seconds left it is broken into.
+CAUSES = ("on its book", "on Kalshi's book", "on another book", "on an exchange", "on the clock", "not recorded")  # As cause() gives.
 LARGEST = 5             # The largest opportunities listed.
 
 
@@ -42,6 +43,24 @@ def one_each(order):
     What one contract at the best price an order filled made after the fee.
     """
     return fair.edge(float(order["side"] == order["result"]), order["best"], FEE_RATES[order["venue"]])
+
+
+def cause(order):
+    """
+    What brought an order's decision, as the report groups it, see paper_orders.cause in schema.sql: a change of its venue's
+    own book, of Kalshi's, of another market's, an exchange's quote, the once a second pricing, or not recorded, as before
+    2026-10-15.
+    """
+    c = order["cause"]
+    if c is None:
+        return "not recorded"
+    if c == order["venue"]:
+        return "on its book"
+    if c == "kalshi":
+        return "on Kalshi's book"
+    if c in VENUES or c == "other":
+        return "on another book"
+    return "on the clock" if c == "time" else "on an exchange"
 
 
 def row(label, orders):
@@ -86,10 +105,16 @@ def report(orders, log=print):
             log(row(label, [o for o in mine if low <= o["edge"] < high]))
         for low, high in SPANS:
             log(row(f"{low // 60}-{high // 60} min left", [o for o in mine if low < o["close_time"] - o["decided"] <= high]))
+        for label in CAUSES:
+            group = [o for o in mine if cause(o) == label]
+            if group:
+                log(row(label, group))
         for day in sorted({datetime.fromtimestamp(o["decided"], UTC).date() for o in mine}):
             log(row(f"{day}", [o for o in mine if datetime.fromtimestamp(o["decided"], UTC).date() == day]))
     log("\nAll after each venue's taker fee, two standard errors counting each window once. Expected: the fair price's edge on the")
-    log("contracts filled. Realized: what they made. One each: one contract an order at the best price filled.")
+    log("contracts filled. Realized: what they made. One each: one contract an order at the best price filled. On its book, on")
+    log("Kalshi's book, on an exchange, on the clock: what brought the decision, a change of the venue's own book, of Kalshi's,")
+    log("whose mid the fair price is blended with, an exchange's quote, or time alone moving the model.")
 
 
 # OPPORTUNITIES

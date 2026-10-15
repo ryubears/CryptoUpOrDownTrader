@@ -14,7 +14,8 @@ from upordowntrader.paper import report, run
 from upordowntrader.paper.trader import PaperTrader
 
 
-def order(venue="kalshi", ticker="K", close_time=1000, decided=500.0, side="yes", contracts=10.0, cost=0.4, edge=0.03, **more):
+def order(venue="kalshi", ticker="K", close_time=1000, decided=500.0, side="yes", contracts=10.0, cost=0.4, edge=0.03, cause="coinbase",
+          **more):
     """
     A paper order as the trader stores it, filled at cost a contract.
     """
@@ -22,7 +23,7 @@ def order(venue="kalshi", ticker="K", close_time=1000, decided=500.0, side="yes"
     return {"venue": venue, "ticker": ticker, "close_time": close_time, "decided": decided, "side": side, "price": 80_000.0, "model": 0.5,
             "mid": 0.4, "fair": 0.45, "edge": edge, "limit_price": cost, "offered": 50.0, "arrived": decided + 0.02, "contracts": contracts,
             "cost": cost if contracts else None, "best": cost if contracts else None, "fees": contracts * fair.fee(cost, rate),
-            "expected": contracts * fair.edge(0.45, cost, rate), **more}
+            "expected": contracts * fair.edge(0.45, cost, rate), "cause": cause, **more}
 
 
 def test_settling_pays_the_side_that_won_less_cost_and_fees_once(tmp_path):
@@ -87,8 +88,9 @@ def test_settling_reads_each_venues_markets_and_settles_their_orders(tmp_path, m
     assert logs == [f"paper kalshi K settled yes: 1 orders, 10 contracts, {10 * (0.6 - fair.fee(0.4)):+.2f}$"]
 
 
-def test_the_report_gives_each_venue_by_edge_time_left_and_day(tmp_path):
-    orders = [{**order(close_time=1000 * k, decided=1000 * k - 400.0, edge=0.02 + 0.01 * k), "result": "yes" if k % 2 else "no"}
+def test_the_report_gives_each_venue_by_edge_time_left_what_brought_the_decision_and_day(tmp_path):
+    causes = {1: "kalshi", 2: "coinbase", 3: "time", 4: None}
+    orders = [{**order(close_time=1000 * k, decided=1000 * k - 400.0, edge=0.02 + 0.01 * k, cause=causes[k]), "result": "yes" if k % 2 else "no"}
               for k in range(1, 5)]
     for o in orders:
         o["profit"] = o["contracts"] * (o["side"] == o["result"]) - o["contracts"] * o["cost"] - o["fees"]
@@ -97,8 +99,17 @@ def test_the_report_gives_each_venue_by_edge_time_left_and_day(tmp_path):
     text = "\n".join(lines)
     assert "5 paper orders from 1970-01-01 00:10 to 1970-01-01 01:23 UTC, 4 settled, 5 filled" in text
     assert "kalshi" in text and "polymarket_us" not in text
-    for label in ("all", "edge 2-3c", "edge 3-5c", "edge 5c+", "5-10 min left", "1970-01-01"):
+    for label in ("all", "edge 2-3c", "edge 3-5c", "edge 5c+", "5-10 min left", "on its book", "on an exchange", "on the clock", "not recorded",
+                  "1970-01-01"):
         assert any(line.strip().startswith(label) for line in lines), label
+    assert not any(line.strip().startswith("on Kalshi's book") for line in lines)     # Only Polymarket US's orders can come on it.
+
+
+def test_an_orders_cause_is_grouped_from_its_venue():
+    assert [report.cause(order(venue=v, cause=c)) for v, c in (("kalshi", "kalshi"), ("polymarket_us", "polymarket_us"),
+                                                               ("polymarket_us", "kalshi"), ("kalshi", "polymarket_us"), ("kalshi", "other"),
+                                                               ("kalshi", "kraken"), ("kalshi", "time"), ("kalshi", None))] == \
+        ["on its book", "on its book", "on Kalshi's book", "on another book", "on another book", "on an exchange", "on the clock", "not recorded"]
 
 
 def opportunity(venue="polymarket_us", start=1000.0, take=(100.0, 50.0, 2.0), lasted=0.5, book_changed=1, left=500.0, **more):

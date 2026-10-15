@@ -131,6 +131,11 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     expected     REAL NOT NULL,      -- The fair price's edge after the fee on the contracts filled, in dollars.
     result       TEXT,               -- 'yes' or 'no' once the venue settled the window, null until.
     profit       REAL,               -- What the contracts filled made after the fees, in dollars, once settled.
+    cause        TEXT,               -- What brought the decision: the venue whose book of the window's market changed,
+                                     -- 'kalshi' or 'polymarket_us', the exchange whose quote moved the price, as 'coinbase',
+                                     -- 'time' for the once a second pricing, or 'other' for another market's book. Null for
+                                     -- the orders before 2026-10-15, and added to the table after its first rows, see
+                                     -- database.ADDED_COLUMNS.
     PRIMARY KEY (venue, ticker, decided, side)
 );
 
