@@ -17,11 +17,12 @@ before the last 5 minutes, whose moves the market sees coming and the model does
                 orders on their way counted at their size: without it, a model at odds with the market for a whole window
                 bought the same side again each time its edge came back, 1,346 contracts of the 22:15 window of 2026-10-13
 
-Hyperliquid's 15 minute windows, the same bet on its perp's mark, from 2026-10-15 under a rule of their own, set from a
-replay of its recorded books against Kalshi's over 265 windows, where buying its quotes Kalshi's mid had moved past made
-+3.6 +/- 2.3 cents a contract at 3 cents, its book changing every 7 seconds or so: the fair price is Kalshi's mid alone,
-both sides quoted within MAX_SPREAD, without the model; orders from its listing, 15 to 25 seconds into the window, until
-MIN_LEFT seconds before the close; an edge of THRESHOLDS; the rest as above. Its window's market is found in its list, see
+Hyperliquid's 15 minute windows, the same bet on its perp's mark, from 2026-10-15 under a rule of their own, to see
+whether its quotes lag Kalshi's: the fair price is Kalshi's mid alone, both sides quoted within MAX_SPREAD, without the
+model; orders from its listing, 15 to 25 seconds into the window, until MIN_LEFT seconds before the close; an edge of
+THRESHOLDS, from 2026-10-15 2 cents, as on the other venues; the rest as above. A replay of its recorded books had found
++3.6 +/- 2.3 cents a contract at 3 cents, but those books were the 5.4 second snapshots of Hyperliquid's l2Book feed alone,
+whose quotes had often moved already, see api/hyperliquid.py, so the paper orders are the test. Its window's market is found in its list, see
 name_windows(). Opening a position there is free, and the fee it may take at settlement, see SETTLE_FEES, a fraction of a
 cent, is left out of the edge and taken from the profit as the window settles.
 
@@ -64,8 +65,8 @@ from upordowntrader.db.models import Market
 from upordowntrader.model import fair, pricing
 
 # Edge after the fee, in dollars a contract, an order needs: the benchmark's best before the last 5 minutes on Kalshi and
-# Polymarket US, and on Hyperliquid what its replay against Kalshi's mid kept the most of.
-THRESHOLDS = {"kalshi": 0.02, "polymarket_us": 0.02, "hyperliquid": 0.03}
+# Polymarket US, and the same on Hyperliquid.
+THRESHOLDS = {"kalshi": 0.02, "polymarket_us": 0.02, "hyperliquid": 0.02}
 CONTRACTS = 10              # The most contracts an order takes.
 WINDOW_CONTRACTS = 50       # The most contracts the trader buys of one window on one venue, both sides together.
 MIN_LEFT = {"kalshi": 300, "polymarket_us": 300, "hyperliquid": 60}     # Seconds before the close the last order may be decided.

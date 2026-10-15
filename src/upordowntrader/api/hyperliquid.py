@@ -415,21 +415,34 @@ def levels(side, depth):
     return [[float(level["px"]), float(level["sz"])] for level in (side or [])[:depth]]
 
 
-def subscription_frame(method, wanted):
+def subscription_frames(method, wanted):
     """
-    The frame that subscribes to, or unsubscribes from, a coin: an outcome side's book for '#' coins, a perp's prices,
-    its mark among them, for any other. method is 'subscribe' or 'unsubscribe'.
+    The frames that subscribe to, or unsubscribe from, a coin: an outcome side's book and its best bid and ask for '#'
+    coins, a perp's prices, its mark among them, for any other. method is 'subscribe' or 'unsubscribe'.
     """
-    kind = "l2Book" if wanted.startswith("#") else "activeAssetCtx"
-    return {"method": method, "subscription": {"type": kind, "coin": wanted}}
+    kinds = ("l2Book", "bbo") if wanted.startswith("#") else ("activeAssetCtx",)
+    return [{"method": method, "subscription": {"type": kind, "coin": wanted}} for kind in kinds]
+
+
+def merged(levels, best, bid):
+    """
+    A side of a book with its best level from the bbo feed laid over the levels of the last snapshot: the best, then the
+    snapshot's levels behind it, those it has passed dropped. An empty side when best is None.
+    """
+    if best is None:
+        return []
+    return [best, *(level for level in levels if (level[0] < best[0] if bid else level[0] > best[0]))]
 
 
 class HyperliquidBookStream(BookStream):
     """
     Hyperliquid's outcome books and its perps' marks, on one connection. A wanted '#' coin's book goes to on_book with
-    Hyperliquid's time, every time it changes, each message the whole book. Any other wanted coin is a perp whose mark
-    and oracle prices go to on_mark(coin, mark, oracle) as they come, about once a second, which keeps the connection
-    from going quiet: Hyperliquid closes one it has sent nothing for a minute.
+    Hyperliquid's time, every time it changes. Hyperliquid sends the whole book, l2Book, only every 5.4 seconds or so, for
+    a perp as for an outcome, on 2026-10-15, while the best bid and ask, bbo, come as they move, every 0.4 seconds or so
+    on a 15 minute window: so the book passed on is the newest snapshot with the newest best levels laid over it, see
+    merged(), each time either comes. Any other wanted coin is a perp whose mark and oracle prices go to on_mark(coin,
+    mark, oracle) as they come, about once a second, which keeps the connection from going quiet: Hyperliquid closes one
+    it has sent nothing for a minute.
     """
 
     name = "hyperliquid"
@@ -437,17 +450,37 @@ class HyperliquidBookStream(BookStream):
     def __init__(self, contract_ids, on_book, on_gap=None, log=print):
         super().__init__(contract_ids, on_book, on_gap, log)
         self.on_mark = lambda coin, mark, oracle: None
+        self.snapshots = {}         # Coin maps to its newest whole book, (Hyperliquid's time, bids, asks).
+        self.tops = {}              # Coin maps to its newest best levels, (Hyperliquid's time, bid, ask), each None when empty.
+
+    def reset(self):
+        self.snapshots, self.tops = {}, {}
 
     def connect(self):
         return self.open_connection(WS_URL)
 
     async def subscribe(self, ws):
         for wanted in sorted(self.wanted):
-            await ws.send(json.dumps(subscription_frame("subscribe", wanted)))
+            for frame in subscription_frames("subscribe", wanted):
+                await ws.send(json.dumps(frame))
 
     async def send_command(self, ws, action, coins):
         for wanted in coins:
-            await ws.send(json.dumps(subscription_frame("subscribe" if action == "add" else "unsubscribe", wanted)))
+            for frame in subscription_frames("subscribe" if action == "add" else "unsubscribe", wanted):
+                await ws.send(json.dumps(frame))
+            if action != "add":
+                self.snapshots.pop(wanted, None)
+                self.tops.pop(wanted, None)
+
+    def pass_on(self, coin):
+        """
+        Pass on a coin's book: its snapshot, with the best levels laid over it when they are newer, timed by the newer.
+        """
+        sent, bids, asks = self.snapshots.get(coin, (None, [], []))
+        top = self.tops.get(coin)
+        if top is not None and (sent is None or top[0] >= sent):
+            sent, bids, asks = top[0], merged(bids, top[1], True)[:self.depth], merged(asks, top[2], False)[:self.depth]
+        self.on_book(coin, bids, asks, sent)
 
     def handle(self, raw):
         m = json.loads(raw)
@@ -456,9 +489,16 @@ class HyperliquidBookStream(BookStream):
             self.log(f"hyperliquid stream error: {str(data)[:200]}")
         if not isinstance(data, dict) or data.get("coin") not in self.wanted:
             return False                                        # A subscription's acknowledgement, or a coin let go.
+        coin, sent = data["coin"], data["time"] / 1000 if data.get("time") else None
         if channel == "l2Book":
             bids, asks = data.get("levels") or ([], [])
-            self.on_book(data["coin"], levels(bids, self.depth), levels(asks, self.depth), data["time"] / 1000 if data.get("time") else None)
+            self.snapshots[coin] = (sent, levels(bids, self.depth), levels(asks, self.depth))
+            self.pass_on(coin)
+            return True
+        if channel == "bbo":
+            bid, ask = (data.get("bbo") or [None, None])[:2]
+            self.tops[coin] = (sent, *(levels([level], 1)[0] if level else None for level in (bid, ask)))
+            self.pass_on(coin)
             return True
         if channel == "activeAssetCtx":
             ctx = data.get("ctx") or {}

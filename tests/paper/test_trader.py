@@ -235,17 +235,17 @@ def test_hyperliquid_is_traded_against_kalshis_mid_alone_at_its_own_threshold(tm
     t, clock, _ = setup(tmp_path, venues=("kalshi", "hyperliquid"))
     listed(t)
     t.on_book("kalshi", "K", [[0.49, 10.0]], [[0.51, 10.0]], clock.now)     # Kalshi's mid is 50c, and so is the model at the strike.
-    t.on_book("hyperliquid", "#1230", [[0.40, 20.0]], [[0.48, 50.0]], clock.now)
-    assert not t.pending                                        # Yes at 48c is 2c under Kalshi's mid: not Hyperliquid's 3c.
+    t.on_book("hyperliquid", "#1230", [[0.40, 20.0]], [[0.49, 50.0]], clock.now)
+    assert not t.pending                                        # Yes at 49c is 1c under Kalshi's mid: not Hyperliquid's 2c.
     quote(t, clock, 80_110.0)                                   # The model says Up is likely, which Hyperliquid's fair price leaves out,
     assert [o["venue"] for o in t.pending] == ["kalshi"]        # though Kalshi's own rule trades on it.
-    t.on_book("hyperliquid", "#1230", [[0.40, 20.0]], [[0.46, 5.0], [0.47, 30.0], [0.48, 50.0]], clock.now)
+    t.on_book("hyperliquid", "#1230", [[0.40, 20.0]], [[0.46, 5.0], [0.48, 30.0], [0.49, 50.0]], clock.now)
     (order,) = [o for o in t.pending if o["venue"] == "hyperliquid"]
-    assert (order["side"], order["limit_price"], order["offered"], order["fair"]) == ("yes", 0.47, 35.0, 0.5)
+    assert (order["side"], order["limit_price"], order["offered"], order["fair"]) == ("yes", 0.48, 35.0, 0.5)
     assert order["edge"] == pytest.approx(0.04) and order["cause"] == "hyperliquid"
     step(t, clock, clock.now + 1)
     (stored,) = [o for o in orders(t) if o["venue"] == "hyperliquid"]
-    assert (stored["contracts"], stored["cost"], stored["fees"]) == (10.0, pytest.approx(0.465), 0.0)       # 5 at 46c, 5 at 47c.
+    assert (stored["contracts"], stored["cost"], stored["fees"]) == (10.0, pytest.approx(0.47), 0.0)        # 5 at 46c, 5 at 48c.
     assert stored["arrived"] == pytest.approx(order["decided"] + paper.ORDER_SECONDS["hyperliquid"])
 
 

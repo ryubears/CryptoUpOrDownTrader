@@ -89,9 +89,28 @@ def test_the_book_stream_passes_on_outcome_books_and_perp_marks():
                                                                                               "midPx": "83788.5", "funding": "0.0000068"}}}))
     assert marks == [("BTC", 83802.3, 83840.4)]
     assert not s.handle(json.dumps({"channel": "l2Book", "data": {"coin": "#999990", "time": 1, "levels": [[], []]}}))   # Let go.
-    assert hyperliquid.subscription_frame("unsubscribe", "#113760") == {"method": "unsubscribe",
-                                                                       "subscription": {"type": "l2Book", "coin": "#113760"}}
-    assert hyperliquid.subscription_frame("subscribe", "ETH")["subscription"] == {"type": "activeAssetCtx", "coin": "ETH"}
+    assert hyperliquid.subscription_frames("unsubscribe", "#113760") == [
+        {"method": "unsubscribe", "subscription": {"type": "l2Book", "coin": "#113760"}},
+        {"method": "unsubscribe", "subscription": {"type": "bbo", "coin": "#113760"}}]
+    assert [f["subscription"] for f in hyperliquid.subscription_frames("subscribe", "ETH")] == [{"type": "activeAssetCtx", "coin": "ETH"}]
+
+
+def test_the_best_levels_come_between_snapshots_laid_over_the_newest_one():
+    s, books, _ = stream(["#113760"])
+    s.handle(json.dumps({"channel": "l2Book", "data": {"coin": "#113760", "time": 1000_000, "levels": [
+        [{"px": "0.50", "sz": "10", "n": 1}, {"px": "0.49", "sz": "20", "n": 1}, {"px": "0.47", "sz": "30", "n": 1}],
+        [{"px": "0.53", "sz": "5", "n": 1}, {"px": "0.55", "sz": "15", "n": 1}]]}}))
+    # The bid rose to 0.51 and the ask's best was taken, both after the snapshot: the snapshot's levels behind them stay.
+    assert s.handle(json.dumps({"channel": "bbo", "data": {"coin": "#113760", "time": 1002_000, "bbo": [
+        {"px": "0.51", "sz": "4", "n": 1}, {"px": "0.55", "sz": "15", "n": 1}]}}))
+    assert books[-1] == ("#113760", [[0.51, 4.0], [0.50, 10.0], [0.49, 20.0], [0.47, 30.0]], [[0.55, 15.0]], 1002.0)
+    # The bid fell to 0.48: the snapshot's 0.50 and 0.49, gone by then, are dropped.
+    s.handle(json.dumps({"channel": "bbo", "data": {"coin": "#113760", "time": 1003_000, "bbo": [{"px": "0.48", "sz": "2", "n": 1}, None]}}))
+    assert books[-1] == ("#113760", [[0.48, 2.0], [0.47, 30.0]], [], 1003.0)                  # No ask left at all.
+    # A newer snapshot is taken whole, as the best levels it has are newer than those of the bbo.
+    s.handle(json.dumps({"channel": "l2Book", "data": {"coin": "#113760", "time": 1005_000, "levels": [
+        [{"px": "0.46", "sz": "1", "n": 1}], [{"px": "0.60", "sz": "2", "n": 1}]]}}))
+    assert books[-1] == ("#113760", [[0.46, 1.0]], [[0.60, 2.0]], 1005.0)
 
 
 def test_the_quote_stream_passes_on_the_perps_best_bid_and_ask_with_its_time():
