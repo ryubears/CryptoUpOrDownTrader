@@ -172,7 +172,7 @@ def venues(conn, windows):
     rows = []
     for k, h in both:
         t = np.arange(h.close_time - 900 + LISTING, h.close_time, 1.0)
-        bk, bh = replay.book_changes(conn, k.ticker), replay.book_changes(conn, h.ticker)
+        bk, bh = replay.book_changes(conn, k.ticker), replay.book_changes(conn, h.ticker, "hyperliquid")
         at = np.searchsorted(bh.times, t, side="right") - 1
         spread = np.where(at >= 0, bh.ask[np.maximum(at, 0)] - bh.bid[np.maximum(at, 0)], np.nan)
         rows.append(np.column_stack([h.close_time - t, mids(bk, t, 0.10), mids(bh, t), spread]))
@@ -275,7 +275,7 @@ def model(conn, windows, readings):
         minute = (np.floor(t).astype(int) - start) // 60 - 1
         ok = np.isfinite(price) & (minute >= 0) & (minute < len(variances[perp]))
         z = pricing.z_scores(price[ok], observed[ok], m.strike, seconds_left[ok], np.maximum(variances[perp][minute[ok]], fair.TINY), readings)
-        mid = mids(replay.book_changes(conn, m.ticker), t[ok])
+        mid = mids(replay.book_changes(conn, m.ticker, "hyperliquid"), t[ok])
         rows.append(np.column_stack([m.close_time - t[ok], fair.chance(z, seconds_left[ok]), mid, np.full(ok.sum(), m.result == "yes")]))
     d = np.vstack(rows)
     print(f"{len(priced)} windows, {sum(m.result == 'yes' for m in priced)} up")

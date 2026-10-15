@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from upordowntrader.backtest import lead, replay
 from upordowntrader.db import database
+from upordowntrader.db.models import Market
 
 
 def test_the_correlation_peaks_at_the_lag_the_source_moves_first_by():
@@ -49,3 +50,21 @@ def test_kalshis_mid_counts_only_both_sides_within_the_widest_spread():
     book = replay.Book(np.array([1.0, 2.0, 3.0]), np.array([0.40, 0.30, np.nan]), np.array([0.42, 0.45, 0.50]), [], [])
     mids = lead.kalshi_mid(book, [0.5, 1.5, 2.5, 3.5])
     assert np.isnan(mids[[0, 2, 3]]).all() and mids[1] == pytest.approx(0.41)
+
+
+def test_a_source_counts_only_in_the_windows_it_quoted_through(tmp_path, capsys):
+    conn = database.connect(tmp_path / "history.sqlite")
+    start = 1_791_896_400
+    windows = [Market("kalshi", f"K{k}", f"K{k}", "KXBTC15M", start + 900 * k, start + 900 * (k + 1), 80_000.0, None, "yes", None) for k in (0, 1)]
+    walk = 80_000 + np.cumsum(np.random.default_rng(3).normal(0, 5, 2200))
+    seconds = (start - 200 + np.arange(2200)).astype(float)
+    rows = [(source, t + 0.08, t, p - 0.5, 1.0, p + 0.5, 1.0) for source in ("coinbase", "kraken") for t, p in zip(seconds, walk, strict=True)]
+    rows += [("binance perp", t + 0.08, t, p - 0.5, 1.0, p + 0.5, 1.0) for t, p in zip(seconds, walk, strict=True) if t <= start + 950]    # Stopped.
+    database.store_quotes(conn, rows)
+    mids = np.round(0.5 + (walk - 80_000) / 1e4, 2)                            # Kalshi's book moves with the price, 2 cents wide.
+    database.store_books(conn, [("kalshi", m.ticker, t, t, b - 0.01, 10.0, b + 0.01, 10.0, f"[[{b - 0.01}, 10.0]]", f"[[{b + 0.01}, 10.0]]")
+                                for m in windows for t, b in zip(seconds, mids, strict=True) if m.open_time <= t < m.close_time])
+    lead.lead(conn, windows, ["coinbase", "kraken", "binance perp"])
+    counted = {line.split()[0]: int(line.split()[2 if line.startswith("binance") else 1]) for line in capsys.readouterr().out.splitlines()
+               if line.startswith(("coinbase", "kraken", "binance perp"))}
+    assert counted == {"coinbase": 2, "kraken": 2, "binance": 1}

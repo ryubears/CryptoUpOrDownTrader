@@ -121,6 +121,14 @@ def test_a_kraken_quote_with_a_stale_stamp_is_timed_by_its_arrival(tmp_path):
     assert replay.price_at(feed, [START + 2.5, START + 4.5]).tolist() == [100.0, 104.0]
 
 
+def test_a_markets_book_is_read_from_its_venue_kalshi_unless_said(tmp_path):
+    conn = database.connect(tmp_path / "history.sqlite")
+    database.store_books(conn, [("kalshi", "K", START + 1.0, START + 0.9, 0.48, 10.0, 0.52, 10.0, "[[0.48, 10.0]]", "[[0.52, 10.0]]"),
+                                ("hyperliquid", "K", START + 2.0, START + 1.9, 0.30, 5.0, 0.40, 5.0, "[[0.3, 5.0]]", "[[0.4, 5.0]]")])
+    assert replay.book_changes(conn, "K").ask.tolist() == [0.52]
+    assert replay.book_changes(conn, "K", "hyperliquid").ask.tolist() == [0.40]
+
+
 def test_a_moment_inside_the_averaging_minutes_first_second_counts_no_reading_taken():
     market = Market("kalshi", "T", "E", "KXBTC15M", OPEN, OPEN + 900, 80_000.0, None, "yes", None)
     feed = flat_feed(80_010.0)

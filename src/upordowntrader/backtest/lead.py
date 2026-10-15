@@ -5,7 +5,9 @@ The quotes recorded, see record/run.py, are those of the six exchanges BRTI is b
 see backtest/replay.py, and of bitcoin perpetuals, where price moves may start. On 2026-10-13 Kalshi's mid moved 0.1 to
 0.5 seconds before the exchanges' average, and with 1 to 2 minutes left anticipated about half of the average's move to
 the close, more than its own head start explains; neither BRTI, momentum, nor the exchanges' order book imbalance
-accounted for the rest. This asks whether a perpetual does.
+accounted for the rest. This asks whether a perpetual does. Five were recorded from 2026-10-12 22:45 UTC to 2026-10-15,
+see record/run.py's PERP_STREAMS, and none did: over the 208 windows, they moved with Kalshi's book rather than before
+it, led the average by no more than Crypto.com, one of the six, and left the model's log loss no better.
 
     LEAD    each source's changes over STEP seconds against those of the exchanges' average, of the other five for one
             of the six, and against Kalshi's mid, at lags up to LAG_SECONDS each way, all by the venues' own times: the
@@ -28,7 +30,7 @@ from upordowntrader.common.log import log
 from upordowntrader.db import database
 from upordowntrader.history import download
 from upordowntrader.model import fair, pricing
-from upordowntrader.record.run import QUOTE_STREAMS
+from upordowntrader.record.run import PERP_STREAMS, QUOTE_STREAMS
 
 STEP = 0.1                  # Seconds each change is measured over.
 LAG_SECONDS = 3             # The furthest lag tried each way.
@@ -150,6 +152,7 @@ def lead(conn, windows, sources):
           f"source moves first,\n   'first' the share of correlation on that side, and catch up the share of its move ahead the average makes")
     start, end = windows[0].open_time - BASIS_SECONDS - 60, windows[-1].close_time + 10
     feeds = {s: replay.quote_feed(conn, s, start, end) for s in sources}
+    last = {s: max((times[-1] for times in feeds[s].times if len(times)), default=-np.inf) for s in sources}
     lags = range(-round(LAG_SECONDS / STEP), round(LAG_SECONDS / STEP) + 1)
     sums = {s: ({lag: np.zeros(6) for lag in lags}, {lag: np.zeros(6) for lag in lags}) for s in sources}
     catch = {s: {h: [0.0, 0.0] for h in (1, 5)} for s in sources}
@@ -159,7 +162,7 @@ def lead(conn, windows, sources):
         dm = np.diff(kalshi_mid(replay.book_changes(conn, m.ticker), g))
         for s in sources:
             src = at_once(feeds[s], g)
-            if np.isnan(src[0]):
+            if np.isnan(src[0]) or last[s] < m.close_time:     # Not yet quoting at the open, or no longer by the close.
                 continue
             others = joined([feeds[e] for e in replay.EXCHANGES if e != s and e in feeds])
             average = at_once(others, g)
@@ -255,6 +258,15 @@ def model(conn, windows, sources, log=print):
     print("'all' adds the sources' moves averaged. A beta of 1 moves the model's price by the whole of the source's move ahead.")
 
 
+def quoted_through(conn, source, start, end):
+    """
+    Whether a source's quotes were recorded from start to end, in seconds since 1970: one at or before start, and one at
+    or after end.
+    """
+    return all(conn.execute(f"SELECT 1 FROM quotes WHERE source = ? AND received {op} ? LIMIT 1", (source, t)).fetchone()
+               for op, t in (("<=", start), (">=", end)))
+
+
 # MAIN
 
 if __name__ == "__main__":
@@ -262,9 +274,8 @@ if __name__ == "__main__":
     windows = replay.recorded_windows(conn)
     if not windows:
         raise SystemExit("no settled window recorded from its open yet, run the recorder for a while")
-    sources = list(QUOTE_STREAMS)
+    sources = [*QUOTE_STREAMS, *PERP_STREAMS]
     lead(conn, windows, sources)
     perps = [s for s in sources if s not in replay.EXCHANGES]
-    recorded = [m for m in windows if all(conn.execute("SELECT 1 FROM quotes WHERE source = ? AND received <= ? LIMIT 1",
-                                                       (s, m.open_time - BASIS_SECONDS - 60)).fetchone() for s in perps)]
+    recorded = [m for m in windows if all(quoted_through(conn, s, m.open_time - BASIS_SECONDS - 60, m.close_time) for s in perps)]
     model(conn, recorded, perps, log)

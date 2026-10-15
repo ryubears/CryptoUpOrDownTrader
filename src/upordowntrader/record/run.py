@@ -1,8 +1,8 @@
 """
 Record Kalshi's Bitcoin 15 minute windows: their order books as they change, and how each one settled, and beside them
 the best bid and ask of Coinbase, Kraken, Bitstamp, Gemini, Bullish, and Crypto.com, six of the seven exchanges BRTI is
-built from, and of bitcoin perpetuals, as they move. And the same of Polymarket US's 15 minute windows, the same bet as
-Kalshi's, and of Hyperliquid's up or down windows on BTC, with the perp's mark, which they settle on.
+built from, and of Hyperliquid's bitcoin perpetual, as they move. And the same of Polymarket US's 15 minute windows, the
+same bet as Kalshi's, and of Hyperliquid's up or down windows on BTC, with the perp's mark, which they settle on.
 
 A window's market is listed a day ahead and trades only during its 15
 minutes. Just after each quarter hour, and every REFRESH_SECONDS besides,
@@ -88,16 +88,19 @@ SETTLE_REACH = 6 * 3600     # Seconds after its close a Hyperliquid or Polymarke
 MARK_REACH = 30             # Seconds around a daily window's close its settlement reads marks from.
 # Each exchange whose best bid and ask are recorded, with its quote stream and its name for bitcoin in dollars. The first
 # six are among the exchanges BRTI is built from, as CF Benchmarks listed them on 2026-08-24; LMAX Digital, the other, has
-# no public feed to read without an account. The rest are bitcoin perpetuals, where price moves may start, recorded to
-# see which leads, see backtest/lead.py: Hyperliquid's, the busiest four elsewhere that answer the AWS instance, three in
-# tether, and Coinbase Derivatives' US one.
+# no public feed to read without an account. The last is Hyperliquid's perpetual, whose windows settle on its mark.
 QUOTE_STREAMS = {"coinbase": (coinbase.CoinbaseQuoteStream, "BTC-USD"), "kraken": (kraken.KrakenQuoteStream, "BTC/USD"),
                  "bitstamp": (bitstamp.BitstampQuoteStream, "btcusd"), "gemini": (gemini.GeminiQuoteStream, "BTCUSD"),
                  "bullish": (bullish.BullishQuoteStream, "BTCUSD"), "cryptocom": (cryptocom.CryptoComQuoteStream, "BTC_USD"),
-                 "hyperliquid": (hyperliquid.HyperliquidQuoteStream, "BTC"), "binance perp": (binance.BinanceQuoteStream, "BTCUSDT"),
-                 "bybit perp": (bybit.BybitQuoteStream, "BTCUSDT"), "okx perp": (okx.OkxQuoteStream, "BTC-USDT-SWAP"),
-                 "deribit perp": (deribit.DeribitQuoteStream, "BTC-PERPETUAL"),
-                 "coinbase perp": (coinbase.CoinbasePerpQuoteStream, "BIP-20DEC30-CDE")}
+                 "hyperliquid": (hyperliquid.HyperliquidQuoteStream, "BTC")}
+# Bitcoin perpetuals, where price moves may start: the busiest four that answer the AWS instance, three in tether, and
+# Coinbase Derivatives' US one. Recorded from 2026-10-12 22:45 UTC to 2026-10-15 to see which leads, see backtest/lead.py,
+# and no longer: over the 208 windows between, none moved before Kalshi's book, none led the six exchanges' average by
+# more than Crypto.com does, and none made the model's log loss better with 1 to 5 minutes left. Moved into
+# QUOTE_STREAMS, one is recorded again.
+PERP_STREAMS = {"binance perp": (binance.BinanceQuoteStream, "BTCUSDT"), "bybit perp": (bybit.BybitQuoteStream, "BTCUSDT"),
+                "okx perp": (okx.OkxQuoteStream, "BTC-USDT-SWAP"), "deribit perp": (deribit.DeribitQuoteStream, "BTC-PERPETUAL"),
+                "coinbase perp": (coinbase.CoinbasePerpQuoteStream, "BIP-20DEC30-CDE")}
 
 
 async def refresh(conn, stream, recorder, reads):

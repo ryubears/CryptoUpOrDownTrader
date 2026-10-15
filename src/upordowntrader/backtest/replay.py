@@ -176,12 +176,14 @@ def best_prices(sides):
     return np.array([levels[0][0] if levels else np.nan for levels in sides], dtype=float)
 
 
-def book_changes(conn, ticker):
+def book_changes(conn, ticker, venue="kalshi"):
     """
-    A recorded market's Book. A snapshot, which carries no time, takes its arrival shifted by the median gap between
-    arrival and Kalshi's time.
+    A recorded market's Book, on Kalshi unless venue says another. A snapshot, which carries no time, takes its arrival
+    shifted by the median gap between arrival and the venue's time. The venue lets the books' index find the market's
+    rows, which the ticker alone would leave to a scan of every book.
     """
-    rows = conn.execute("SELECT received, sent, bids, asks FROM books WHERE ticker = ? ORDER BY received", (ticker,)).fetchall()
+    rows = conn.execute("SELECT received, sent, bids, asks FROM books WHERE venue = ? AND ticker = ? ORDER BY received",
+                        (venue, ticker)).fetchall()
     received = np.array([r[0] for r in rows], dtype=float)
     sent = np.array([np.nan if r[1] is None else r[1] for r in rows], dtype=float)
     timed = ~np.isnan(sent)
@@ -308,7 +310,7 @@ def recorded_windows(conn):
     """
     The settled Kalshi windows recorded from their open, oldest first.
     """
-    first = dict(conn.execute("SELECT ticker, MIN(received) FROM books GROUP BY ticker").fetchall())
+    first = dict(conn.execute("SELECT ticker, MIN(received) FROM books WHERE venue = 'kalshi' GROUP BY ticker").fetchall())
     return [m for m in database.load_markets(conn, "kalshi")
             if m.result and m.strike is not None and first.get(m.ticker) is not None and first[m.ticker] <= m.open_time + 5]
 
