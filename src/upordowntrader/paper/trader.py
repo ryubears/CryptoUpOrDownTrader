@@ -15,7 +15,8 @@ before the last 5 minutes, whose moves the market sees coming and the model does
     size        an immediate or cancel limit for up to CONTRACTS contracts at the worst price whose edge reaches the threshold,
                 and from 2026-10-14 no more than WINDOW_CONTRACTS contracts of a window on a venue, both sides together, the
                 orders on their way counted at their size: without it, a model at odds with the market for a whole window
-                bought the same side again each time its edge came back, 1,346 contracts of the 22:15 window of 2026-10-13
+                bought the same side again each time its edge came back, 1,346 contracts of the 22:15 window of 2026-10-13.
+                10 and 50 until 2026-10-15, 50 and 250 since, to see what the edges hold at a size worth trading
 
 Hyperliquid's 15 minute windows, the same bet on its perp's mark, from 2026-10-15 under a rule of their own, to see
 whether its quotes lag Kalshi's: the fair price is Kalshi's mid alone, both sides quoted within MAX_SPREAD, without the
@@ -67,8 +68,8 @@ from upordowntrader.model import fair, pricing
 # Edge after the fee, in dollars a contract, an order needs: the benchmark's best before the last 5 minutes on Kalshi and
 # Polymarket US, and the same on Hyperliquid.
 THRESHOLDS = {"kalshi": 0.02, "polymarket_us": 0.02, "hyperliquid": 0.02}
-CONTRACTS = 10              # The most contracts an order takes.
-WINDOW_CONTRACTS = 50       # The most contracts the trader buys of one window on one venue, both sides together.
+CONTRACTS = 50              # The most contracts an order takes.
+WINDOW_CONTRACTS = 250      # The most contracts the trader buys of one window on one venue, both sides together.
 MIN_LEFT = {"kalshi": 300, "polymarket_us": 300, "hyperliquid": 60}     # Seconds before the close the last order may be decided.
 MAX_SPREAD = 0.10           # The widest Kalshi spread whose mid Hyperliquid is traded against.
 DEPTH = 10                  # Levels a side the trader keeps of each book.

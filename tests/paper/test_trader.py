@@ -36,11 +36,12 @@ class Clock:
 def setup(tmp_path, venues=("kalshi",)):
     """
     A trader on a clock a minute and a bit before the window opens, with the window, a fit whose fair price is the model's,
-    a variance forecast, and Coinbase quoting 50 above BRTI's level, stepped through the open.
+    a variance forecast, and Coinbase quoting 50 above BRTI's level, stepped through the open. Orders of up to 10 contracts
+    and 50 a window, as the small books here are made for, the rule's own sizes aside, see the test of them.
     """
     clock = Clock(OPEN - 70.0)
     logs = []
-    t = paper.PaperTrader(database.connect(tmp_path / "history.sqlite"), logs.append, clock)
+    t = paper.PaperTrader(database.connect(tmp_path / "history.sqlite"), logs.append, clock, contracts=10, window_contracts=50)
     t.venues = venues
     t.fit, t.variance = MODEL_ONLY, (np.full(200, 1e-9), OPEN - 3600)
     t.set_windows([Market("kalshi", "K", "K", "KXBTC15M", OPEN, CLOSE, STRIKE, None, None, None)])
@@ -157,6 +158,18 @@ def test_a_window_takes_no_more_than_its_cap_on_a_venue_counting_the_orders_on_t
         quote(t, clock, 80_050.0)
     assert sizes == [10, 10, 5, None] and [o["contracts"] for o in orders(t)] == [10.0, 10.0, 5.0]
     assert logs.count("paper kalshi K holds 25 contracts, the window's cap, so it takes no more") == 1
+
+
+def test_the_rule_buys_up_to_50_contracts_an_order_and_250_a_window_on_a_venue(tmp_path):
+    t, clock, logs = setup(tmp_path)
+    t.contracts, t.window_contracts = paper.CONTRACTS, paper.WINDOW_CONTRACTS
+    t.on_book("kalshi", "K", BIDS, [[0.52, 10_000.0]], clock.now)
+    for _ in range(6):                                          # Six episodes of the same edge.
+        quote(t, clock, 80_110.0)
+        step(t, clock, clock.now + 1)
+        quote(t, clock, 80_050.0)
+    assert [o["contracts"] for o in orders(t)] == [50.0] * 5
+    assert logs.count("paper kalshi K holds 250 contracts, the window's cap, so it takes no more") == 1
 
 
 def test_no_order_in_the_last_five_minutes_or_on_a_book_whose_stream_is_down(tmp_path):
