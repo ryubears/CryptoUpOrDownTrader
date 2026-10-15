@@ -126,14 +126,23 @@ def test_the_report_gives_each_venue_by_edge_time_left_what_brought_the_decision
     for o in orders:
         o["profit"] = o["contracts"] * (o["side"] == o["result"]) - o["contracts"] * o["cost"] - o["fees"]
     lines = []
-    report.report([*orders, {**order(decided=5000.0), "result": None, "profit": None}], lines.append)
+    late = {**order(venue="hyperliquid", ticker="#1230", close_time=4000, decided=3880.0, cause="kalshi"), "result": "yes"}
+    late["profit"] = late["contracts"] * (1 - late["cost"]) - late["fees"]
+    report.report([*orders, late, {**order(decided=5000.0), "result": None, "profit": None}], lines.append)
     text = "\n".join(lines)
-    assert "5 paper orders from 1970-01-01 00:10 to 1970-01-01 01:23 UTC, 4 settled, 5 filled" in text
+    assert "6 paper orders from 1970-01-01 00:10 to 1970-01-01 01:23 UTC, 5 settled, 6 filled" in text
     assert "kalshi" in text and "polymarket_us" not in text
+    # Kalshi's 5 orders of 10 contracts at 40c, one not settled yet, two of them in the first window.
+    assert ("  traded in 4 of 4 windows priced: 1.2 filled orders and 5.21$ of capital a window on average, 5.21$ in a window traded, "
+            "8.34$ at most") in lines
+    start = next(i for i, line in enumerate(lines) if line.startswith("\nhyperliquid\n"))
+    assert any(line.strip().startswith("1-5 min left") for line in lines[start:])          # 2 minutes left, on Hyperliquid,
+    assert not any(line.strip().startswith("1-5 min left") for line in lines[:start])      # and none on Kalshi.
     for label in ("all", "edge 2-3c", "edge 3-5c", "edge 5c+", "5-10 min left", "on its book", "on an exchange", "on the clock", "not recorded",
                   "1970-01-01"):
         assert any(line.strip().startswith(label) for line in lines), label
-    assert not any(line.strip().startswith("on Kalshi's book") for line in lines)     # Only Polymarket US's orders can come on it.
+    assert not any(line.strip().startswith("on Kalshi's book") for line in lines[:start])     # Kalshi's own orders cannot come on it,
+    assert any(line.strip().startswith("on Kalshi's book") for line in lines[start:])          # Hyperliquid's can.
 
 
 def test_an_orders_cause_is_grouped_from_its_venue():
@@ -168,7 +177,9 @@ def test_the_opportunities_report_gives_what_one_order_each_could_have_taken_and
     lines = []
     report.report_opportunities(database.load_opportunities(conn), "since the first", lines.append)
     text = "\n".join(lines)
-    assert "3 opportunities at a positive edge after the fee, since the first, 2 reaching the threshold" in text
+    assert "3 opportunities at a positive edge after the fee, since the first, over 3 windows priced, 2 reaching the threshold" in text
+    assert ("  a window: 0.7 edges at 2c or more on average, in 2 of the 3 windows priced, 1 at most, of 1.0 at any positive edge; "
+            "one order each would have needed 18$ a window, expecting 0.83$") in lines
     assert "polymarket_us opportunities (one order at 2c or more)" in text and "kalshi opportunities" not in text
     assert "2 episodes could have taken 55$ in one order each, expecting 2.50$" in text
     yearly = 100 * (2.0 * 365 / rows[0]["days_held"] + 0.5 * 365 / rows[1]["days_held"]) / 55

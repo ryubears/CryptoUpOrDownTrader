@@ -1,16 +1,17 @@
 """
 Report what the paper orders made, see paper/trader.py, as the replay reports its trades: by venue, with two standard
 errors that count each window once, as its orders share its outcome, then by the edge they were decided at, by the
-minutes left, by what brought the decision, see cause(), and day by day.
+minutes left, by what brought the decision, see cause(), and day by day, and the capital they used a window.
 
     expected    the fair price's edge after the fee on the contracts filled, what they make on average if it is right
     realized    what they made, from how the windows settled
     one each    what one contract an order, the best price filled, made: the edge without the depth
 
 Then the opportunities the trader saw, as PredictionArbitrageTrader's summary shows its own: each venue's that one order
-could have taken at the threshold or more, what those orders would have cost with the fees, the profit they were expected
-to make, its return on that capital and its rate a year, both weighted by capital, until the windows paid, and how long
-the edge stayed at the threshold or more. Then the contracts that stayed at it through each one's longest stretch, which
+could have taken at the threshold or more, how many came a window, what those orders would have cost with the fees, in all
+and a window, the profit they were expected to make, its return on that capital and its rate a year, both weighted by
+capital, until the windows paid, and how long the edge stayed at the threshold or more. Then the contracts that stayed
+at it through each one's longest stretch, which
 an order sent at any moment of it could have had, of all of them and of those whose stretch outlasted an order's trip to
 the venue, see trader.ORDER_SECONDS, which an order could have reached, how often the peak came with the venue's own book
 change rather than the fair price's, by minutes left, and the largest. The profits are the fair price's expectation, not
@@ -33,7 +34,7 @@ from upordowntrader.model import fair
 from upordowntrader.paper.trader import FEE_RATES, ORDER_SECONDS, VENUES
 
 EDGES = ((0.02, 0.03), (0.03, 0.05), (0.05, 1.0))       # Edges at the decision the report is broken into, in dollars a contract.
-SPANS = ((600, 900), (300, 600))                        # Seconds left it is broken into.
+SPANS = ((600, 900), (300, 600), (60, 300))             # Seconds left it is broken into: Hyperliquid trades into the last 5 minutes.
 CAUSES = ("on its book", "on Kalshi's book", "on another book", "on an exchange", "on the clock", "not recorded")  # As cause() gives.
 LARGEST = 5             # The largest opportunities listed.
 
@@ -81,9 +82,17 @@ def row(label, orders):
             f"{100 * realized:>+9.1f} ±{100 * error:>4.1f}c{100 * one:>+9.1f} ±{100 * one_error:>4.1f}c{profit:>+10.2f}$")
 
 
-def report(orders, log=print):
+def capital(order):
     """
-    Print the report of the paper orders, as dicts of the paper_orders columns.
+    What an order's contracts cost with the fees, nothing when none filled.
+    """
+    return order["contracts"] * (order["cost"] or 0.0) + order["fees"]
+
+
+def report(orders, log=print, windows=None):
+    """
+    Print the report of the paper orders, as dicts of the paper_orders columns. windows is how many windows the trader
+    priced over the time, see priced(), by default those the orders were in.
     """
     if not orders:
         log("no paper orders yet, run upordowntrader.paper.run for a while")
@@ -104,13 +113,23 @@ def report(orders, log=print):
             label = f"edge {100 * low:.0f}-{100 * high:.0f}c" if high < 1 else f"edge {100 * low:.0f}c+"
             log(row(label, [o for o in mine if low <= o["edge"] < high]))
         for low, high in SPANS:
-            log(row(f"{low // 60}-{high // 60} min left", [o for o in mine if low < o["close_time"] - o["decided"] <= high]))
+            group = [o for o in mine if low < o["close_time"] - o["decided"] <= high]
+            if group:
+                log(row(f"{low // 60}-{high // 60} min left", group))
         for label in CAUSES:
             group = [o for o in mine if cause(o) == label]
             if group:
                 log(row(label, group))
         for day in sorted({datetime.fromtimestamp(o["decided"], UTC).date() for o in mine}):
             log(row(f"{day}", [o for o in mine if datetime.fromtimestamp(o["decided"], UTC).date() == day]))
+        filled = [o for o in orders if o["venue"] == venue and o["contracts"] > 0]
+        used = {}
+        for o in filled:
+            used[o["close_time"]] = used.get(o["close_time"], 0.0) + capital(o)
+        n = windows or len({o["close_time"] for o in orders})
+        if used:
+            log(f"  traded in {len(used):,} of {n:,} windows priced: {len(filled) / n:.1f} filled orders and {sum(used.values()) / n:,.2f}$ "
+                f"of capital a window on average, {sum(used.values()) / len(used):,.2f}$ in a window traded, {max(used.values()):,.2f}$ at most")
     log("\nAll after each venue's taker fee, two standard errors counting each window once. Expected: the fair price's edge on the")
     log("contracts filled. Realized: what they made. One each: one contract an order at the best price filled. On its book, on")
     log("Kalshi's book, on an exchange, on the clock: what brought the decision, a change of the venue's own book, of Kalshi's,")
@@ -164,13 +183,23 @@ def print_table(title, header, body, log=print, left=1):
         log("  " + "  ".join(str(v).ljust(w) if i < left else str(v).rjust(w) for i, (v, w) in enumerate(zip(r, widths, strict=True))))
 
 
+def priced(opportunities):
+    """
+    How many windows the trader priced, from the opportunities: every window priced has some, on some venue, at a positive
+    edge.
+    """
+    return len({o["close_time"] for o in opportunities})
+
+
 def report_opportunities(opportunities, label, log=print):
     """
     Print the opportunities, as dicts of the opportunities columns, that one order could have taken at the threshold or
     more, see the module's docstring. label says over what time.
     """
     taken = [o for o in opportunities if o["take_size"]]
-    log(f"\n{len(opportunities):,} opportunities at a positive edge after the fee, {label}, {len(taken):,} reaching the threshold")
+    n = priced(opportunities)
+    log(f"\n{len(opportunities):,} opportunities at a positive edge after the fee, {label}, over {n:,} windows priced, {len(taken):,} reaching "
+        f"the threshold")
     for venue in VENUES:
         rows = sorted((o for o in taken if o["venue"] == venue), key=lambda o: o["take_profit"], reverse=True)
         if not rows:
@@ -179,8 +208,15 @@ def report_opportunities(opportunities, label, log=print):
         capital, profit, ret, annual, minutes = totals(rows)
         lasted = [o["min_edge_seconds"] for o in rows]
         through = [o for o in rows if o["min_edge_size"]]
+        per = {}
+        for o in rows:
+            per[o["close_time"]] = per.get(o["close_time"], 0) + 1
+        positive = sum(o["venue"] == venue for o in opportunities)
         log(f"\n{venue} opportunities (one order at {cents} or more)")
         log(f"  {len(rows):,} episodes could have taken {capital:,.0f}$ in one order each, expecting {profit:,.2f}$")
+        log(f"  a window: {len(rows) / n:.1f} edges at {cents} or more on average, in {len(per):,} of the {n:,} windows priced, {max(per.values())} "
+            f"at most, of {positive / n:.1f} at any positive edge; one order each would have needed {capital / n:,.0f}$ a window, expecting "
+            f"{profit / n:,.2f}$")
         log(f"  {percent(ret)}% on capital, {percent(annual)}% a year, held {minutes or 0:,.1f} minutes on average")
         log(f"  at {cents} or more for {seconds(quantile(lasted, 0.5))} at the median, {seconds(quantile(lasted, 0.9))} at the 90th percentile, "
             f"{seconds(max(lasted))} at the longest")
@@ -241,5 +277,6 @@ if __name__ == "__main__":
     conn = database.connect(args.db)
     since = max(time.time() - 3600 * args.hours if args.hours else 0.0, args.since or 0.0)
     label = f"since {datetime.fromtimestamp(since, UTC):%Y-%m-%d %H:%M} UTC" if since else "since the first"
-    report([o for o in database.load_paper_orders(conn) if o["decided"] >= since])
-    report_opportunities(database.load_opportunities(conn, since), label)
+    opportunities = database.load_opportunities(conn, since)
+    report([o for o in database.load_paper_orders(conn) if o["decided"] >= since], windows=priced(opportunities) or None)
+    report_opportunities(opportunities, label)
