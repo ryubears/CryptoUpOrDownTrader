@@ -133,8 +133,9 @@ def test_the_report_gives_each_venue_by_edge_time_left_what_brought_the_decision
     assert "6 paper orders from 1970-01-01 00:10 to 1970-01-01 01:23 UTC, 5 settled, 6 filled" in text
     assert "kalshi" in text and "polymarket_us" not in text
     # Kalshi's 5 orders of 10 contracts at 40c, one not settled yet, two of them in the first window.
-    assert ("  traded in 4 of 4 windows priced: 1.2 filled orders and 5.21$ of capital a window on average, 5.21$ in a window traded, "
-            "8.34$ at most") in lines
+    assert ("  spent a window, fees included: 5.21$ on average over the 4 windows priced, 5.21$ in each of the 4 it bought in, 8.34$ at "
+            "most; 1.2 filled orders a window") in lines
+    assert "How to read it, in cents a contract, after each venue's fees:" in lines and "top of book" in lines[1]
     start = next(i for i, line in enumerate(lines) if line.startswith("\nhyperliquid\n"))
     assert any(line.strip().startswith("1-5 min left") for line in lines[start:])          # 2 minutes left, on Hyperliquid,
     assert not any(line.strip().startswith("1-5 min left") for line in lines[:start])      # and none on Kalshi.
@@ -161,7 +162,7 @@ def opportunity(venue="polymarket_us", start=1000.0, take=(100.0, 50.0, 2.0), la
     days = (left + 10) / 86400
     return {"venue": venue, "ticker": "P", "close_time": int(start + left), "side": "yes", "start_time": start, "end_time": start + 1,
             "seconds": 1.0, "peak_time": start, "peak_edge": 0.03, "peak_price": 0.5, "peak_fair": 0.55, "peak_size": 120.0, "peak_capital": 60.0,
-            "peak_profit": 2.2, "book_changed": book_changed, "days_held": days, "return_pct": 5.6, "annual_pct": 5.6 * 365 / days,
+            "peak_profit": 2.2, "book_changed": book_changed, "days_held": days, "return_pct": 5.6,
             "min_edge": 0.02, "min_edge_seconds": lasted if take else None, "min_edge_size": 40.0 if take else None,
             "min_edge_capital": 20.0 if take else None, "min_edge_profit": 0.8 if take else None, "take_size": size, "take_capital": capital,
             "take_profit": profit, "take_return_pct": 100 * profit / capital if take else None, "min_edge_total": lasted if take else None,
@@ -178,12 +179,13 @@ def test_the_opportunities_report_gives_what_one_order_each_could_have_taken_and
     report.report_opportunities(database.load_opportunities(conn), "since the first", lines.append)
     text = "\n".join(lines)
     assert "3 opportunities at a positive edge after the fee, since the first, over 3 windows priced, 2 reaching the threshold" in text
-    assert ("  a window: 0.7 edges at 2c or more on average, in 2 of the 3 windows priced, 1 at most, of 1.0 at any positive edge; "
-            "one order each would have needed 18$ a window, expecting 0.83$") in lines
-    assert "polymarket_us opportunities (one order at 2c or more)" in text and "kalshi opportunities" not in text
-    assert "2 episodes could have taken 55$ in one order each, expecting 2.50$" in text
-    yearly = 100 * (2.0 * 365 / rows[0]["days_held"] + 0.5 * 365 / rows[1]["days_held"]) / 55
-    assert f"{100 * 2.5 / 55:,.1f}% on capital, {yearly:,.1f}% a year" in text
+    assert ("  a window: 0.7 edges on average, in 2 of the 3 windows priced, 1 at most, of 1.0 at any positive edge; "
+            "buying them would have cost 18$ a window, expecting 0.83$") in lines
+    assert "polymarket_us opportunities (edges of 2c or more)" in text and "kalshi opportunities" not in text
+    held = (50.0 * rows[0]["days_held"] + 5.0 * rows[1]["days_held"]) / 55 * 1440
+    assert (f"  2 edges: buying each in full, in one order at its best moment, would have cost 55$ with the fees, expecting 2.50$, "
+            f"{100 * 2.5 / 55:,.1f}% of the cost, held {held:,.1f} minutes on average until the window paid") in lines
+    assert "year" not in text and "annual" not in text
     assert "at 2c or more for 2.000s at the median, 2.000s at the 90th percentile, 2.000s at the longest" in text
     assert "80 contracts stayed, 40$ expecting 1.60$" in text and "own book change in 50%" in text
     assert "2 of the stretches outlasted an order's trip to polymarket_us, 136 ms: through them 80 contracts stayed" in text
@@ -191,7 +193,7 @@ def test_the_opportunities_report_gives_what_one_order_each_could_have_taken_and
     database.settle_opportunities(conn, "polymarket_us", "P", "yes")
     lines = []
     report.report_opportunities(database.load_opportunities(conn), "since the first", lines.append)
-    assert "  2 settled: they made +55.00$ on 55$, +100.00%, against +2.50$, +4.55%, expected" in lines
+    assert "  2 settled: bought in full they would have made +55.00$ on their 55$ cost, +100.00%, against +2.50$, +4.55%, expected" in lines
     assert "  at 2c or more for 2.000s in all at the median, every stretch counted, 2.000s at the 90th percentile" in lines
 
 

@@ -1,21 +1,23 @@
 """
-Report what the paper orders made, see paper/trader.py, as the replay reports its trades: by venue, with two standard
-errors that count each window once, as its orders share its outcome, then by the edge they were decided at, by the
-minutes left, by what brought the decision, see cause(), and day by day, and the capital they used a window.
+Report what the paper orders made, see paper/trader.py, as the replay reports its trades: by venue, then by the edge they
+were decided at, by the minutes left, by what brought the decision, see cause(), and day by day, and what they spent a
+window. In cents a contract, after each venue's fees, see LEGEND:
 
-    expected    the fair price's edge after the fee on the contracts filled, what they make on average if it is right
-    realized    what they made, from how the windows settled
-    one each    what one contract an order, the best price filled, made: the edge without the depth
+    expected    the edge the fair price saw in each contract filled, the chance it pays less its price and fee: what it
+                makes on average if the fair price is right
+    made        what each did make once its window settled, with two standard errors that count each window once, as a
+                window's orders win or lose together
+    top of book what each order would have made had it bought one contract alone, at the best price it got: the edge
+                without the deeper levels a larger order walks into
 
-Then the opportunities the trader saw, as PredictionArbitrageTrader's summary shows its own: each venue's that one order
-could have taken at the threshold or more, how many came a window, what those orders would have cost with the fees, in all
-and a window, the profit they were expected to make, its return on that capital and its rate a year, both weighted by
-capital, until the windows paid, and how long the edge stayed at the threshold or more. Then the contracts that stayed
-at it through each one's longest stretch, which
-an order sent at any moment of it could have had, of all of them and of those whose stretch outlasted an order's trip to
-the venue, see trader.ORDER_SECONDS, which an order could have reached, how often the peak came with the venue's own book
-change rather than the fair price's, by minutes left, and the largest. The profits are the fair price's expectation, not
-locked in, until the windows settle: then what each one's take actually made beside it, and its return on the capital.
+Then the opportunities the trader saw, as PredictionArbitrageTrader's summary shows its own: each venue's edges at the
+threshold or more, how many came a window, what buying each in full in one order at its best moment would have cost with
+the fees, in all and a window, the profit it was expected to make and that over the cost, how long it was held until the
+window paid, and how long the edge stayed at the threshold or more. Then the contracts that stayed at it through each
+one's longest stretch, which an order sent at any moment of it could have had, of all of them and of those whose stretch
+outlasted an order's trip to the venue, see trader.ORDER_SECONDS, how often the peak came with the venue's own book change
+rather than the fair price's, by minutes left, and the largest. The profits are the fair price's expectation, not locked
+in, until the windows settle: then what each one actually made beside it, and that over its cost.
 
 Run from src/ with:
     python3 -m upordowntrader.paper.report
@@ -30,20 +32,30 @@ from datetime import UTC, datetime
 from upordowntrader.backtest.replay import window_mean
 from upordowntrader.common.stats import quantile
 from upordowntrader.db import database
-from upordowntrader.model import fair
-from upordowntrader.paper.trader import FEE_RATES, ORDER_SECONDS, VENUES
+from upordowntrader.paper.trader import ORDER_SECONDS, VENUES, venue_edge
 
 EDGES = ((0.02, 0.03), (0.03, 0.05), (0.05, 1.0))       # Edges at the decision the report is broken into, in dollars a contract.
 SPANS = ((600, 900), (300, 600), (60, 300))             # Seconds left it is broken into: Hyperliquid trades into the last 5 minutes.
 CAUSES = ("on its book", "on Kalshi's book", "on another book", "on an exchange", "on the clock", "not recorded")  # As cause() gives.
 LARGEST = 5             # The largest opportunities listed.
+LEGEND = ("",
+          "How to read it, in cents a contract, after each venue's fees:",
+          "  expected     the edge the fair price saw in each contract filled, the chance it pays less its price and fee: what it",
+          "               makes on average if the fair price is right",
+          "  made         what each did make once its window settled, +/- two standard errors that count each window once, as a",
+          "               window's orders win or lose together: a gap to expected smaller than that is noise",
+          "  top of book  what each order would have made had it bought one contract alone, at the best price it got: the edge",
+          "               without the deeper levels a larger order walks into",
+          "  profit       dollars made in all",
+          "  on its book, on Kalshi's book, on an exchange, on the clock: what brought the decision, a change of the venue's own",
+          "               book, of Kalshi's, an exchange's quote moving the model, or time alone moving it")
 
 
 def one_each(order):
     """
-    What one contract at the best price an order filled made after the fee.
+    What one contract at the best price an order filled made after the venue's fees: the report's top of book.
     """
-    return fair.edge(float(order["side"] == order["result"]), order["best"], FEE_RATES[order["venue"]])
+    return venue_edge(order["venue"], float(order["side"] == order["result"]), order["best"])
 
 
 def cause(order):
@@ -101,8 +113,8 @@ def report(orders, log=print, windows=None):
     first, last = (datetime.fromtimestamp(orders[i]["decided"], UTC) for i in (0, -1))
     log(f"\n{len(orders)} paper orders from {first:%Y-%m-%d %H:%M} to {last:%Y-%m-%d %H:%M} UTC, {len(settled)} settled, "
         f"{sum(o['contracts'] > 0 for o in orders)} filled")
-    header = (f"{'':>16}{'orders':>8}{'filled':>8}{'windows':>9}{'contracts':>11}{'expected':>11}{'realized':>16}{'one each':>16}{'profit':>11}\n"
-              f"{'':>52}{'a contract':>11}{'a contract':>16}{'realized':>16}")
+    header = (f"{'':>16}{'orders':>8}{'filled':>8}{'windows':>9}{'contracts':>11}{'expected':>11}{'made':>16}{'top of book':>16}{'profit':>11}\n"
+              f"{'':>52}{'c/contract':>11}{'c/contract':>16}{'c/contract':>16}{'$':>11}")
     for venue in VENUES:
         mine = [o for o in settled if o["venue"] == venue]
         if not mine:
@@ -128,12 +140,11 @@ def report(orders, log=print, windows=None):
             used[o["close_time"]] = used.get(o["close_time"], 0.0) + capital(o)
         n = windows or len({o["close_time"] for o in orders})
         if used:
-            log(f"  traded in {len(used):,} of {n:,} windows priced: {len(filled) / n:.1f} filled orders and {sum(used.values()) / n:,.2f}$ "
-                f"of capital a window on average, {sum(used.values()) / len(used):,.2f}$ in a window traded, {max(used.values()):,.2f}$ at most")
-    log("\nAll after each venue's taker fee, two standard errors counting each window once. Expected: the fair price's edge on the")
-    log("contracts filled. Realized: what they made. One each: one contract an order at the best price filled. On its book, on")
-    log("Kalshi's book, on an exchange, on the clock: what brought the decision, a change of the venue's own book, of Kalshi's,")
-    log("whose mid the fair price is blended with, an exchange's quote, or time alone moving the model.")
+            log(f"  spent a window, fees included: {sum(used.values()) / n:,.2f}$ on average over the {n:,} windows priced, "
+                f"{sum(used.values()) / len(used):,.2f}$ in each of the {len(used):,} it bought in, {max(used.values()):,.2f}$ at most; "
+                f"{len(filled) / n:.1f} filled orders a window")
+    for line in LEGEND:
+        log(line)
 
 
 # OPPORTUNITIES
@@ -154,15 +165,14 @@ def seconds(value):
 
 def totals(group):
     """
-    What the opportunities' one orders would have cost, (capital, expected profit, return %, annual %, minutes held), the
-    returns and minutes weighted by capital, each over the days until its window paid.
+    What buying the opportunities in full, one order each, would have cost with the fees, and expected: (cost, expected
+    profit, that as a percent of the cost, minutes held until the windows paid, weighted by cost).
     """
     capital, profit = sum(o["take_capital"] for o in group), sum(o["take_profit"] for o in group)
     if capital <= 0:
-        return capital, profit, None, None, None
-    yearly = sum(o["take_profit"] * 365 / o["days_held"] for o in group)
+        return capital, profit, None, None
     minutes = sum(o["take_capital"] * o["days_held"] for o in group) / capital * 1440
-    return capital, profit, 100 * profit / capital, 100 * yearly / capital, minutes
+    return capital, profit, 100 * profit / capital, minutes
 
 
 def actual(group):
@@ -205,19 +215,19 @@ def report_opportunities(opportunities, label, log=print):
         if not rows:
             continue
         cents = f"{100 * rows[0]['min_edge']:.0f}c"
-        capital, profit, ret, annual, minutes = totals(rows)
+        capital, profit, ret, minutes = totals(rows)
         lasted = [o["min_edge_seconds"] for o in rows]
         through = [o for o in rows if o["min_edge_size"]]
         per = {}
         for o in rows:
             per[o["close_time"]] = per.get(o["close_time"], 0) + 1
         positive = sum(o["venue"] == venue for o in opportunities)
-        log(f"\n{venue} opportunities (one order at {cents} or more)")
-        log(f"  {len(rows):,} episodes could have taken {capital:,.0f}$ in one order each, expecting {profit:,.2f}$")
-        log(f"  a window: {len(rows) / n:.1f} edges at {cents} or more on average, in {len(per):,} of the {n:,} windows priced, {max(per.values())} "
-            f"at most, of {positive / n:.1f} at any positive edge; one order each would have needed {capital / n:,.0f}$ a window, expecting "
-            f"{profit / n:,.2f}$")
-        log(f"  {percent(ret)}% on capital, {percent(annual)}% a year, held {minutes or 0:,.1f} minutes on average")
+        others = f", of {positive / n:.1f} at any positive edge" if positive > len(rows) else ""
+        log(f"\n{venue} opportunities (edges of {cents} or more)")
+        log(f"  {len(rows):,} edges: buying each in full, in one order at its best moment, would have cost {capital:,.0f}$ with the fees, "
+            f"expecting {profit:,.2f}$, {percent(ret)}% of the cost, held {minutes or 0:,.1f} minutes on average until the window paid")
+        log(f"  a window: {len(rows) / n:.1f} edges on average, in {len(per):,} of the {n:,} windows priced, {max(per.values())} at most{others}; "
+            f"buying them would have cost {capital / n:,.0f}$ a window, expecting {profit / n:,.2f}$")
         log(f"  at {cents} or more for {seconds(quantile(lasted, 0.5))} at the median, {seconds(quantile(lasted, 0.9))} at the 90th percentile, "
             f"{seconds(max(lasted))} at the longest")
         log(f"  through each one's longest stretch at {cents} or more, {sum(o['min_edge_size'] for o in through):,.0f} contracts stayed, "
@@ -234,28 +244,28 @@ def report_opportunities(opportunities, label, log=print):
                 f"{seconds(quantile(totals_at, 0.9))} at the 90th percentile")
         settled = [o for o in rows if o["actual_profit"] is not None]
         if settled:
-            c, p, _, _, _ = totals(settled)
+            c, p, _, _ = totals(settled)
             made = sum(o["actual_profit"] for o in settled)
-            log(f"  {len(settled):,} settled: they made {made:+,.2f}$ on {c:,.0f}$, {100 * made / c:+.2f}%, against {p:+,.2f}$, "
-                f"{100 * p / c:+.2f}%, expected")
+            log(f"  {len(settled):,} settled: bought in full they would have made {made:+,.2f}$ on their {c:,.0f}$ cost, {100 * made / c:+.2f}%, "
+                f"against {p:+,.2f}$, {100 * p / c:+.2f}%, expected")
         body = []
         for low, high in SPANS:
             group = [o for o in rows if low < o["close_time"] - o["peak_time"] <= high]
             if group:
-                c, p, r, a, m = totals(group)
+                c, p, r, m = totals(group)
                 lasted = [o["min_edge_seconds"] for o in group]
                 body.append((f"{low // 60}-{high // 60} min left", f"{len(group):,}", seconds(quantile(lasted, 0.5)), seconds(max(lasted)),
-                             f"{c:,.0f}", f"{p:,.2f}", percent(r), percent(a), f"{m:,.1f}", actual(group)))
-        print_table(f"{venue} opportunities by time left", ("left", "episodes", f"median {cents}+", f"longest {cents}+", "capital $", "profit $",
-                                                             "return %", "annual %", "avg min", "actual $"), body, log)
+                             f"{c:,.0f}", f"{p:,.2f}", percent(r), f"{m:,.1f}", actual(group)))
+        print_table(f"{venue} opportunities by time left", ("left", "edges", f"median {cents}+", f"longest {cents}+", "cost $", "expected $",
+                                                             "expected %", "avg min", "made $"), body, log)
         largest = []
         for o in rows[:LARGEST]:
-            _, _, r, a, m = totals([o])
+            _, _, r, m = totals([o])
             largest.append((f"{o['ticker'][-22:]} {o['side']}", f"{100 * o['peak_edge']:.1f}", seconds(o["min_edge_seconds"]),
                             f"{o['take_size']:,.2f}".rstrip("0").rstrip("."), f"{o['take_capital']:,.0f}", f"{o['take_profit']:,.2f}",
-                            percent(a), f"{m:,.1f}", actual([o]), percent(o["actual_return_pct"])))
-        print_table(f"{venue} largest opportunities", ("market", "peak c", f"{cents}+ for", "size", "capital $", "profit $", "annual %",
-                                                        "minutes", "actual $", "actual %"), largest, log)
+                            percent(r), f"{m:,.1f}", actual([o]), percent(o["actual_return_pct"])))
+        print_table(f"{venue} largest opportunities", ("market", "peak c", f"{cents}+ for", "contracts", "cost $", "expected $", "expected %",
+                                                        "minutes", "made $", "made %"), largest, log)
 
 
 def utc_time(text):

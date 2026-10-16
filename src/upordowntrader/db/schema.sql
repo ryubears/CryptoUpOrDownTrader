@@ -120,8 +120,8 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     price        REAL NOT NULL,      -- Bitcoin's price the model read, the exchanges' average moved onto BRTI's level.
     model        REAL NOT NULL,      -- The model's chance of Up, recalibrated.
     mid          REAL NOT NULL,      -- Kalshi's mid then, an empty side counted as a bid of 0 or an ask of 1.
-    fair         REAL NOT NULL,      -- The fair price of Up traded on, the model blended with Kalshi's mid, or on Hyperliquid
-                                     -- Kalshi's mid alone.
+    fair         REAL NOT NULL,      -- The fair price of Up traded on, the model blended with Kalshi's mid, or Kalshi's mid
+                                     -- alone on Hyperliquid, and on Polymarket US from 2026-10-16.
     edge         REAL NOT NULL,      -- The best price's edge after the venue's taker fee, in dollars a contract.
     limit_price  REAL NOT NULL,      -- The worst price, on the side bought, whose edge reached the threshold.
     offered      REAL NOT NULL,      -- Contracts at the limit or better as decided, less what earlier orders took.
@@ -145,7 +145,9 @@ CREATE TABLE IF NOT EXISTS paper_orders (
 -- Each stretch where buying one side of a window's market on a venue had a positive edge after the venue's taker fee, by
 -- the fair price the paper trader trades on, one row as the stretch ends, as PredictionArbitrageTrader records its
 -- opportunities, see paper/trader.py. Profits are expected ones, the fair price's edge, until the window settles and the
--- actual ones are set beside them, see database.settle_opportunities(). Times in seconds since 1970 by our clock, dollars a
+-- actual ones are set beside them, see database.settle_opportunities(). On Polymarket US and Hyperliquid from 2026-10-16,
+-- as their rule trades, only those whose edge reached the threshold on a change of the venue's own book, and their columns
+-- at the threshold over such stretches alone, see trader.Opportunity. Times in seconds since 1970 by our clock, dollars a
 -- contract or in all as said.
 CREATE TABLE IF NOT EXISTS opportunities (
     venue             TEXT NOT NULL,      -- 'kalshi', 'polymarket_us', or 'hyperliquid'.
@@ -165,7 +167,6 @@ CREATE TABLE IF NOT EXISTS opportunities (
     book_changed      INTEGER NOT NULL,   -- 1 when the peak came with a change of the venue's own book, 0 when the fair price moved.
     days_held         REAL NOT NULL,      -- From the peak until the window pays.
     return_pct        REAL NOT NULL,      -- The peak's edge over what a contract ties up, its price and fee, as a percent.
-    annual_pct        REAL NOT NULL,      -- return_pct scaled to a year over days_held, without compounding.
     min_edge          REAL NOT NULL,      -- The edge the paper trader needs, which the next columns measure at.
     min_edge_seconds  REAL,               -- The longest unbroken stretch at min_edge or more, null without one.
     min_edge_size     REAL,               -- Contracts at min_edge or more through all of that stretch.
@@ -184,7 +185,8 @@ CREATE TABLE IF NOT EXISTS opportunities (
     PRIMARY KEY (venue, ticker, side, start_time)
 );
 -- The last five columns came after the table had rows, see database.ADDED_COLUMNS, and so did the index of those not
--- settled, see database.ADDED_INDEXES.
+-- settled, see database.ADDED_INDEXES. annual_pct, return_pct scaled to a year, which a 15 minute window always makes
+-- huge, was dropped on 2026-10-16, see database.DROPPED_COLUMNS.
 
 CREATE INDEX IF NOT EXISTS idx_opportunities_start ON opportunities (start_time);
 

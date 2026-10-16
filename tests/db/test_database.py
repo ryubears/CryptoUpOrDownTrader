@@ -39,16 +39,18 @@ def test_a_table_made_before_a_column_was_added_gains_it_with_its_rows_kept(tmp_
     database.connect(path)                                      # Once added, connecting again leaves it.
 
 
-def test_opportunities_made_before_their_outcome_columns_gain_them_with_the_takes_return_filled_in(tmp_path):
+def test_opportunities_made_before_their_outcome_columns_gain_them_with_the_takes_return_and_lose_the_rate_a_year(tmp_path):
     path = tmp_path / "history.sqlite"
     old = sqlite3.connect(path)
     old.execute("CREATE TABLE opportunities (venue TEXT NOT NULL, ticker TEXT NOT NULL, close_time INTEGER NOT NULL, side TEXT NOT NULL, "
-                "start_time REAL NOT NULL, take_size REAL, take_capital REAL, take_profit REAL, PRIMARY KEY (venue, ticker, side, start_time))")
-    old.execute("INSERT INTO opportunities VALUES ('kalshi', 'K', 1000, 'yes', 500.0, 10, 5.0, 0.4)")
+                "start_time REAL NOT NULL, annual_pct REAL NOT NULL, take_size REAL, take_capital REAL, take_profit REAL, "
+                "PRIMARY KEY (venue, ticker, side, start_time))")
+    old.execute("INSERT INTO opportunities VALUES ('kalshi', 'K', 1000, 'yes', 500.0, 4800.0, 10, 5.0, 0.4)")
     old.commit()
     old.close()
     conn = database.connect(path)
     assert conn.execute("SELECT take_return_pct, min_edge_total, result, actual_profit FROM opportunities").fetchone() == (8.0, None, None, None)
+    assert "annual_pct" not in {row[1] for row in conn.execute("PRAGMA table_info(opportunities)")}
     assert "idx_opportunities_unsettled" in {row[1] for row in conn.execute("PRAGMA index_list(opportunities)")}
 
 
@@ -57,7 +59,7 @@ def opportunity(side="yes", take=(10.0, 5.0, 0.4), venue="hyperliquid", ticker="
     row = {c: None for c in database.OPPORTUNITY_COLUMNS}
     return {**row, "venue": venue, "ticker": ticker, "close_time": 1000, "side": side, "start_time": start, "end_time": start + 1, "seconds": 1.0,
             "peak_time": start, "peak_edge": 0.04, "peak_price": 0.5, "peak_fair": 0.54, "peak_size": 10.0, "peak_capital": 5.0, "peak_profit": 0.4,
-            "book_changed": 0, "days_held": 0.006, "return_pct": 8.0, "annual_pct": 480.0, "min_edge": 0.03, "take_size": size,
+            "book_changed": 0, "days_held": 0.006, "return_pct": 8.0, "min_edge": 0.03, "take_size": size,
             "take_capital": capital, "take_profit": profit}
 
 

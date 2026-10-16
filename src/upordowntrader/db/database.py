@@ -42,6 +42,7 @@ ADDED_COLUMNS = (("paper_orders", "cause", "TEXT", None),
                  ("opportunities", "actual_return_pct", "REAL", None))
 # Indexes on such columns, made once they are there.
 ADDED_INDEXES = ("CREATE INDEX IF NOT EXISTS idx_opportunities_unsettled ON opportunities (result, close_time)",)
+DROPPED_COLUMNS = (("opportunities", "annual_pct"),)    # Columns schema.sql lost after its table had rows, as (table, column).
 
 
 # CONNECTION
@@ -63,9 +64,13 @@ def connect(db_path=None):
 
 def add_columns(conn):
     """
-    Add each of ADDED_COLUMNS its table lacks, filling its rows as it says, as schema.sql's CREATE TABLE IF NOT EXISTS
-    leaves a table made before as it was, then ADDED_INDEXES.
+    Bring a table made before up to schema.sql, which CREATE TABLE IF NOT EXISTS leaves as it was: add each of
+    ADDED_COLUMNS it lacks, filling its rows as it says, then ADDED_INDEXES, and drop each of DROPPED_COLUMNS it has.
     """
+    for table, column in DROPPED_COLUMNS:
+        if column in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+            with conn:
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
     for table, column, kind, fill in ADDED_COLUMNS:
         if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
             with conn:
@@ -274,7 +279,7 @@ def load_paper_orders(conn):
 # OPPORTUNITIES
 
 OPPORTUNITY_COLUMNS = ("venue", "ticker", "close_time", "side", "start_time", "end_time", "seconds", "peak_time", "peak_edge", "peak_price",
-                       "peak_fair", "peak_size", "peak_capital", "peak_profit", "book_changed", "days_held", "return_pct", "annual_pct",
+                       "peak_fair", "peak_size", "peak_capital", "peak_profit", "book_changed", "days_held", "return_pct",
                        "min_edge", "min_edge_seconds", "min_edge_size", "min_edge_capital", "min_edge_profit", "take_size", "take_capital",
                        "take_profit", "take_return_pct", "min_edge_total")
 OUTCOME_COLUMNS = ("result", "actual_profit", "actual_return_pct")      # Set as the window settles, see settle_opportunities().

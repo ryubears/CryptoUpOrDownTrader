@@ -216,13 +216,18 @@ def test_polymarket_is_traded_on_its_own_book_with_its_own_fee_at_the_fair_price
     assert order["mid"] == pytest.approx(0.80)
 
 
-def test_each_order_notes_what_brought_its_decision(tmp_path):
+def test_each_order_notes_what_brought_its_decision_and_polymarket_us_trades_on_a_change_of_its_own_book(tmp_path):
     t, clock, _ = setup(tmp_path, venues=("kalshi", "polymarket_us"))
     name = polymarket_us.slug(OPEN)
     quote(t, clock, 80_110.0)                                                   # Up is likely,
     t.on_book("polymarket_us", name, [[0.48, 10.0]], [[0.52, 5.0]], clock.now)  # but nothing is priced without Kalshi's book,
-    t.on_book("kalshi", "K", [[0.75, 10.0]], [[0.85, 10.0]], clock.now)         # so its coming brings Polymarket US's order.
+    t.on_book("kalshi", "K", [[0.75, 10.0]], [[0.85, 10.0]], clock.now)         # whose coming brings Polymarket US an edge at 80c,
+    assert not t.pending                                                         # which waits, as Kalshi's book brought it,
     clock.now += 1
+    t.on_book("polymarket_us", name, [[0.48, 10.0]], [[0.51, 5.0]], clock.now)  # for its own book to change while it lasts.
+    (pm,) = t.pending
+    assert (pm["venue"], pm["cause"], pm["fair"]) == ("polymarket_us", "polymarket_us", pytest.approx(0.80))      # Kalshi's mid.
+    step(t, clock, clock.now + 1)
     t.on_book("kalshi", "K", BIDS, ASKS, clock.now)                             # Kalshi's own book brings an edge on Yes.
     step(t, clock, clock.now + 1)
     quote(t, clock, 80_050.0)                                   # At the strike the episodes end,
@@ -233,8 +238,45 @@ def test_each_order_notes_what_brought_its_decision(tmp_path):
     quote(t, clock, 80_110.0)                                   # The edge comes back while the fair price cannot be made,
     t.fit = MODEL_ONLY
     step(t, clock, clock.now + 2)                               # so the next second's pricing brings the order.
-    assert [(o["venue"], o["cause"]) for o in orders(t)] == [("polymarket_us", "kalshi"), ("kalshi", "kalshi"), ("kalshi", "coinbase"),
+    assert [(o["venue"], o["cause"]) for o in orders(t)] == [("polymarket_us", "polymarket_us"), ("kalshi", "kalshi"), ("kalshi", "coinbase"),
                                                              ("kalshi", "time")]
+
+
+def test_polymarket_us_trades_into_the_last_five_minutes_until_its_last_minute(tmp_path):
+    t, clock, _ = setup(tmp_path, venues=("kalshi", "polymarket_us"))
+    name = polymarket_us.slug(OPEN)
+    step(t, clock, CLOSE - 200)                                 # Inside Kalshi's last 5 minutes, which it leaves.
+    t.on_book("kalshi", "K", [[0.44, 10.0]], [[0.46, 10.0]], clock.now)
+    t.on_book("polymarket_us", name, [[0.30, 10.0]], [[0.40, 10.0]], clock.now)     # 40c, 3.3c under Kalshi's 45c mid after the fee.
+    assert [o["venue"] for o in t.pending] == ["polymarket_us"]
+    step(t, clock, CLOSE - paper.MIN_LEFT["polymarket_us"] + 1)
+    t.on_book("polymarket_us", name, [[0.30, 10.0]], [[0.50, 10.0]], clock.now)
+    t.on_book("polymarket_us", name, [[0.30, 10.0]], [[0.39, 10.0]], clock.now)     # Its last minute: none.
+    assert len([o for o in orders(t) if o["venue"] == "polymarket_us"]) == 1 and not t.pending
+
+
+def test_hyperliquid_waits_for_a_change_of_its_own_book_to_trade_and_record_an_edge(tmp_path):
+    t, clock, _ = setup(tmp_path, venues=("kalshi", "hyperliquid"))
+    listed(t)
+    t.on_book("hyperliquid", "#1230", [[0.40, 20.0]], [[0.48, 50.0]], clock.now)
+    clock.now += 1
+    began = clock.now
+    t.on_book("kalshi", "K", [[0.52, 10.0]], [[0.54, 10.0]], clock.now)     # Kalshi's mid rises to 53c, past Hyperliquid's 48c:
+    assert not t.pending                                                    # Kalshi's move, so it waits
+    clock.now += 1
+    t.on_book("hyperliquid", "#1230", [[0.41, 20.0]], [[0.48, 50.0]], clock.now)   # for Hyperliquid's own book to change, its bid here.
+    (order,) = t.pending
+    assert (order["venue"], order["cause"], order["limit_price"], order["fair"]) == ("hyperliquid", "hyperliquid", 0.48, 0.53)
+    clock.now += 1
+    t.on_book("kalshi", "K", [[0.47, 10.0]], [[0.49, 10.0]], clock.now)     # Kalshi falls back to 48c, and the edge goes;
+    clock.now += 1
+    t.on_book("kalshi", "K", [[0.52, 10.0]], [[0.54, 10.0]], clock.now)     # its move brings it back, to wait again,
+    clock.now += 1
+    t.on_book("kalshi", "K", [[0.47, 10.0]], [[0.49, 10.0]], clock.now)     # and it goes before Hyperliquid's book changes:
+    t.tick(clock.now)
+    assert len(orders(t)) == 1                                              # no order for it,
+    (o,) = [o for o in opportunities(t) if o["venue"] == "hyperliquid"]     # nor an opportunity. The first counts from its own book.
+    assert (o["start_time"], o["take_size"], o["min_edge_seconds"], o["min_edge_total"]) == (began, 50.0, 1.0, 1.0)
 
 
 def listed(t, ticker="#1230"):
@@ -252,13 +294,15 @@ def test_hyperliquid_is_traded_against_kalshis_mid_alone_at_its_own_threshold(tm
     assert not t.pending                                        # Yes at 49c is 1c under Kalshi's mid: not Hyperliquid's 2c.
     quote(t, clock, 80_110.0)                                   # The model says Up is likely, which Hyperliquid's fair price leaves out,
     assert [o["venue"] for o in t.pending] == ["kalshi"]        # though Kalshi's own rule trades on it.
-    t.on_book("hyperliquid", "#1230", [[0.40, 20.0]], [[0.46, 5.0], [0.48, 30.0], [0.49, 50.0]], clock.now)
+    t.on_book("hyperliquid", "#1230", [[0.40, 20.0]], [[0.46, 5.0], [0.47, 30.0], [0.48, 50.0]], clock.now)
     (order,) = [o for o in t.pending if o["venue"] == "hyperliquid"]
-    assert (order["side"], order["limit_price"], order["offered"], order["fair"]) == ("yes", 0.48, 35.0, 0.5)
-    assert order["edge"] == pytest.approx(0.04) and order["cause"] == "hyperliquid"
+    assert (order["side"], order["limit_price"], order["offered"], order["fair"]) == ("yes", 0.47, 35.0, 0.5)     # 48c is 2c under
+    assert order["edge"] == pytest.approx(0.5 * (1 - paper.SETTLE_FEES["hyperliquid"]) - 0.46)        # less the fee on the dollar won.
+    assert order["cause"] == "hyperliquid"
     step(t, clock, clock.now + 1)
     (stored,) = [o for o in orders(t) if o["venue"] == "hyperliquid"]
-    assert (stored["contracts"], stored["cost"], stored["fees"]) == (10.0, pytest.approx(0.47), 0.0)        # 5 at 46c, 5 at 48c.
+    assert (stored["contracts"], stored["cost"], stored["fees"]) == (10.0, pytest.approx(0.465), 0.0)       # 5 at 46c, 5 at 47c.
+    assert stored["expected"] == pytest.approx(5 * paper.venue_edge("hyperliquid", 0.5, 0.46) + 5 * paper.venue_edge("hyperliquid", 0.5, 0.47))
     assert stored["arrived"] == pytest.approx(order["decided"] + paper.ORDER_SECONDS["hyperliquid"])
 
 
@@ -343,7 +387,6 @@ def test_an_opportunity_keeps_its_peak_its_longest_stretch_at_the_threshold_and_
     assert o["peak_profit"] == pytest.approx(30 * o["peak_edge"] + 20 * fair.edge(o["peak_fair"], 0.54))
     assert o["days_held"] == pytest.approx((CLOSE + paper.PAYOUT_SECONDS["kalshi"] - start) / 86400)
     assert o["return_pct"] == pytest.approx(100 * o["peak_edge"] / (0.52 + fee))
-    assert o["annual_pct"] == pytest.approx(o["return_pct"] * 365 / o["days_held"])
     assert (o["min_edge_seconds"], o["min_edge_size"], o["take_size"]) == (2.0, 30.0, 50.0)    # The fewest throughout, the best moment.
     assert o["min_edge_capital"] == pytest.approx(10 * (0.52 + fee) + 20 * (0.54 + fair.fee(0.54)))
     assert 0 < o["min_edge_profit"] < o["take_profit"] and o["take_capital"] == pytest.approx(o["peak_capital"])
@@ -363,8 +406,8 @@ def test_an_edge_under_the_threshold_is_an_opportunity_without_a_take_and_ends_w
 def test_the_open_opportunities_are_stored_as_the_trader_stops_and_a_halted_market_ends_its_own(tmp_path):
     t, clock, _ = setup(tmp_path, venues=("kalshi", "polymarket_us"))
     name = polymarket_us.slug(OPEN)
-    t.on_book("kalshi", "K", [[0.40, 10.0]], [[0.48, 40.0]], clock.now)
-    t.on_book("polymarket_us", name, [[0.40, 10.0]], [[0.48, 5.0]], clock.now)
+    t.on_book("kalshi", "K", [[0.40, 10.0]], [[0.48, 40.0]], clock.now)       # Kalshi's mid is 44c,
+    t.on_book("polymarket_us", name, [[0.30, 10.0]], [[0.40, 5.0]], clock.now)  # and Polymarket US's own ask 40c, 2.3c under it.
     clock.now += 1
     t.on_state("polymarket_us", name, "suspended")
     t.tick(clock.now)
