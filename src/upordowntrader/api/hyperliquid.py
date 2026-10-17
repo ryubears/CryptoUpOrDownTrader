@@ -62,9 +62,9 @@ EXCHANGE_URL = "https://api.hyperliquid.xyz/exchange"
 ACCOUNT_FILE = DATA_DIR / "hyperliquid_account.txt"     # The account's address, 0x and 40 hex digits, which holds the money.
 AGENT_KEY_FILE = DATA_DIR / "hyperliquid_agent_key.txt"     # The private key of an API wallet the account approved.
 OUTCOME_ASSETS = 100_000_000    # An outcome side's asset number is this plus its coin's number, see asset().
-SETTLE_FEE_RATE = 0.0007    # What Hyperliquid may take of a winning contract's dollar at settlement: its base spot taker rate,
-                            # an upper bound, as its fee page gives no outcome rate. Opening is free. Unconfirmed until an account
-                            # reads its own, see user_fees().
+SETTLE_FEE_RATE = 0.0014    # What Hyperliquid takes of a winning contract's dollar at settlement, as the live account's
+                            # settlement fills of 2026-10-17 showed: 0.0056 of 4, 0.3402 of 243, 0.14 of 100. Twice the base spot
+                            # taker rate. Opening was free on every fill.
 ORDER_TIMEOUT = 10          # Seconds an order's answer may take.
 SIGNIFICANT = 5             # The most significant figures a price may have.
 MIN_ORDER_DOLLARS = 10.0    # The least an order may be worth, contracts times its limit on the side's own coin, as outcome orders
