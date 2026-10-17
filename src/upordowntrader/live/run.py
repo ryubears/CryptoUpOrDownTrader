@@ -191,10 +191,11 @@ async def trade(db_path=None, seconds=None, dry_run=False, log=log):
     settler = Periodic(SETTLE_SECONDS, log, "live: settling")
     started = last_status = time.time()
     window = None
+    loss = f"a {LOSS_SHARE:.0%} loss over {LOSS_HOURS} hours, " if LOSS_SHARE else ""
     log(f"live trading {VENUE}{', a dry run, nothing sent' if dry_run else ''}: {100 * trader.thresholds[VENUE]:.0f}c edges against Kalshi's "
         f"mid, from {LIVE_MAX_LEFT[VENUE]} to {MIN_LEFT[VENUE]} seconds before the close, up to {trader.contracts} contracts an order and "
-        f"{trader.window_contracts} a window; halting at a {LOSS_SHARE:.0%} loss over {LOSS_HOURS} hours, {LOSING_WINDOWS} losing windows "
-        f"in a row, an order of unknown outcome, or refusals, and while {HALT_FILE} is there; code {code_version()}")
+        f"{trader.window_contracts} a window; halting at {loss}{LOSING_WINDOWS} losing windows in a row, an order of unknown outcome, or "
+        f"refusals, and while {HALT_FILE} is there; code {code_version()}")
     try:
         while seconds is None or time.time() - started < seconds:
             await asyncio.sleep(1)

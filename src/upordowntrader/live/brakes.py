@@ -7,6 +7,9 @@ Live trading halts, and no new order goes out, when:
 
 - the live trades settled in the last LOSS_HOURS lost, net, LOSS_SHARE or more of the live money before them: the
   account's USDC, read again as they settle, plus what the live trades still open cost, less what the settled ones made.
+  Off since 2026-10-18, at the user's request, LOSS_SHARE None: with about $716 in the account and the late edges mostly
+  on the side near 90c, one window lost at the full 250 contracts, about $225, is 31% of it, so the rule would halt on
+  the first such loss rather than on a run of them.
 - each of the last LOSING_WINDOWS windows live trades filled in lost money, net.
 - an order's outcome is unknown: its answer was lost or could not be read, and Hyperliquid could not say what became of
   it by its client id, see executor.recover(), so the records may be wrong until a human has looked.
@@ -24,7 +27,8 @@ from upordowntrader.db import database
 
 HALT_FILE = DATA_DIR / "live_halt.txt"      # Why live trading halted, kept until a human removes it.
 LOSS_HOURS = 12             # The sliding window the loss rule looks at.
-LOSS_SHARE = 0.30           # Net loss of the live trades settled in it, as a share of the live money before them, that halts.
+LOSS_SHARE = None           # Net loss of the live trades settled in it, as a share of the live money before them, that halts, as
+                            # 0.30, or None for no such rule, as since 2026-10-18.
 LOSING_WINDOWS = 10         # Windows in a row whose live trades lost money, net, that halt.
 REJECT_LIMIT = 3            # Orders Hyperliquid refuses in a row that halt.
 SUBJECT = "CryptoUpOrDownTrader live trading halted"
@@ -110,7 +114,7 @@ class Brakes:
             return
         now = self.clock()
         results = database.live_results(self.conn, self.since)
-        net = sum(r["profit"] for r in results if r["settled_at"] >= now - LOSS_HOURS * 3600)
+        net = sum(r["profit"] for r in results if r["settled_at"] >= now - LOSS_HOURS * 3600) if LOSS_SHARE else 0.0
         if net < 0 and self.balance is None:
             self.log("live trading: the loss rule waits for the account's balance")
         elif net < 0:

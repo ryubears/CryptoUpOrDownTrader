@@ -53,7 +53,15 @@ def settled(conn, close, profit, at, cost=5.0):
                                      "fees": 0.0, "profit": profit})
 
 
-def test_a_loss_of_30_percent_of_the_money_over_12_hours_halts_writes_why_and_emails(files):
+def test_no_loss_halts_while_the_loss_rule_is_off(files):
+    b, emails, _ = make(files, balance=1.0)
+    settled(b.conn, int(NOW - HOUR), -500.0, NOW - HOUR)
+    b.check_results()
+    assert halting.LOSS_SHARE is None and b.halted is None and not emails
+
+
+def test_a_loss_of_30_percent_of_the_money_over_12_hours_halts_writes_why_and_emails(files, monkeypatch):
+    monkeypatch.setattr(halting, "LOSS_SHARE", 0.30)        # The rule as it was, should it come back.
     b, emails, _ = make(files)
     settled(b.conn, int(NOW - 13 * HOUR), -500.0, NOW - 13 * HOUR)          # Too long ago to count.
     settled(b.conn, int(NOW - 2 * HOUR), -20.0, NOW - 2 * HOUR)
