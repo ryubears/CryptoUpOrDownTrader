@@ -182,9 +182,11 @@ CREATE TABLE IF NOT EXISTS opportunities (
     actual_profit     REAL,               -- What the take made once settled: its winning contracts' dollars, less a venue's fee on
                                           -- them, less take_capital. Null until settled, or without a take.
     actual_return_pct REAL,               -- actual_profit over take_capital, as a percent.
+    mode              TEXT NOT NULL DEFAULT 'paper',  -- 'live' when the venue was traded with real money as it was seen, by
+                                          -- live/run.py, 'paper' when on paper, by paper/run.py.
     PRIMARY KEY (venue, ticker, side, start_time)
 );
--- The last five columns came after the table had rows, see database.ADDED_COLUMNS, and so did the index of those not
+-- The last six columns came after the table had rows, see database.ADDED_COLUMNS, and so did the index of those not
 -- settled, see database.ADDED_INDEXES. annual_pct, return_pct scaled to a year, which a 15 minute window always makes
 -- huge, was dropped on 2026-10-16, see database.DROPPED_COLUMNS.
 
@@ -209,7 +211,9 @@ CREATE TABLE IF NOT EXISTS trades (
     cost         REAL NOT NULL,      -- Dollars paid for them, fees included.
     fees         REAL NOT NULL,      -- Fees paid when they were bought.
     status       TEXT NOT NULL,      -- 'sent' while its order is out, then 'filled', 'partial', 'unfilled', or 'failed'.
-    pays_at      REAL NOT NULL       -- When the window pays.
+    pays_at      REAL NOT NULL,      -- When the window pays.
+    cause        TEXT                -- What brought the decision, as paper_orders.cause says. Added after the table was made,
+                                     -- see database.ADDED_COLUMNS.
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_market ON trades (venue, ticker);
@@ -245,8 +249,8 @@ CREATE TABLE IF NOT EXISTS orders (
 
 CREATE INDEX IF NOT EXISTS idx_orders_trade ON orders (trade_id);
 
--- How each trade paid out, one row once its window settled, as PredictionArbitrageTrader keeps its settlements. A trade
--- with no row here is still open. Times in seconds since 1970.
+-- How each trade paid out, one row once its window settled, as PredictionArbitrageTrader keeps its settlements, those
+-- that filled nothing too, at nothing. A trade with no row here is still open. Times in seconds since 1970.
 CREATE TABLE IF NOT EXISTS settlements (
     trade_id       INTEGER PRIMARY KEY,   -- The trade, see trades.
     mode           TEXT NOT NULL,         -- The trade's mode.
@@ -255,4 +259,16 @@ CREATE TABLE IF NOT EXISTS settlements (
     payout         REAL NOT NULL,         -- Dollars the contracts held paid: one each when the side bought won.
     fees           REAL NOT NULL,         -- What the venue took at settlement.
     profit         REAL NOT NULL          -- payout less fees less the trade's cost.
+);
+
+-- Everything live trading told a human, by live/notify.py, whether or not the email went out, as PredictionArbitrageTrader
+-- keeps its alerts. Times in seconds since 1970.
+CREATE TABLE IF NOT EXISTS alerts (
+    id       INTEGER PRIMARY KEY,
+    time     REAL NOT NULL,      -- When it was raised.
+    kind     TEXT NOT NULL,      -- 'halt' when live trading halted, see live/brakes.py.
+    subject  TEXT NOT NULL,
+    body     TEXT NOT NULL,
+    sent_at  REAL,               -- When the email went out, null until it has.
+    error    TEXT                -- Why it could not be sent, as no email settings in data/.
 );

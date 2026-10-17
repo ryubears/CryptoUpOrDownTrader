@@ -216,3 +216,28 @@ def test_the_status_line_counts_the_opportunities_one_order_could_have_taken_tod
 def test_a_time_to_report_from_is_read_in_utc_unless_it_says_otherwise():
     assert report.utc_time("2026-10-14T01:00") == 1791939600
     assert report.utc_time("2026-10-13T21:00-04:00") == 1791939600
+
+
+def test_live_trades_are_reported_apart_from_paper_orders_read_as_they_are(tmp_path):
+    from upordowntrader.live.executor import Executor
+    conn = database.connect(tmp_path / "history.sqlite")
+    answers = iter([{"status": "ok", "response": {"type": "order", "data": {"statuses": [{"filled": {"totalSz": "10", "avgPx": "0.4", "oid": 4}}]}}},
+                    {"status": "ok", "response": {"type": "order", "data": {"statuses": [{"error": "Order could not immediately match"}]}}}])
+    run_orders = Executor(conn, lambda *args: next(answers), lambda line: None)
+    for k in range(2):
+        run_orders.trade({"ticker": "#1230", "close_time": 4000, "side": "yes", "signal_ts": 3800.0 + k, "fair": 0.5, "edge": 0.1,
+                          "quantity": 10.0, "limit_price": 0.4, "cause": "hyperliquid"})
+    run_orders.settle([Market("hyperliquid", "#1230", "x", "out-BTC-15m", 3100, 4000, 80_000.0, None, "yes", 4008.0)])
+    database.store_paper_order(conn, order())
+    orders = report.live_orders(conn)
+    assert [(o["contracts"], o["cost"], o["result"]) for o in orders] == [(10.0, 0.4, "yes"), (0.0, None, "yes")]
+    assert orders[0]["expected"] == pytest.approx(10 * (0.5 * (1 - SETTLE_FEES["hyperliquid"]) - 0.4))
+    assert orders[0]["profit"] == pytest.approx(10 * (1 - SETTLE_FEES["hyperliquid"]) - 4.0)
+    lines = []
+    report.report(orders, lines.append, kind="live")
+    assert lines[0] == "\n2 live orders from 1970-01-01 01:03 to 1970-01-01 01:03 UTC, 2 settled, 1 filled"
+    assert any(line.startswith("\nhyperliquid\n") for line in lines) and any(line.strip().startswith("on its book") for line in lines)
+    assert report.live_orders(conn, 3801.0)[0]["decided"] == 3801.0
+    lines = []
+    report.report([], lines.append, kind="live")
+    assert lines == ["no live orders yet, see upordowntrader.live.run"]

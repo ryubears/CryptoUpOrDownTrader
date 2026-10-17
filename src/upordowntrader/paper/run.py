@@ -3,8 +3,9 @@ Paper trade Kalshi's and Polymarket US's Bitcoin 15 minute windows live, see pap
 streams of its own, so either can stop or change without the other.
 
 The process streams Kalshi's books of the window trading and the next, Polymarket US's of the same windows when its API
-key is in data/, Hyperliquid's of the same windows as it lists them, and the best bid and ask of the exchanges BRTI is
-built from. It reads Kalshi's windows just after each
+key is in data/, and the best bid and ask of the exchanges BRTI is built from. Hyperliquid was paper traded from
+2026-10-15 until 2026-10-18, when live/run.py began trading it with real money; its paper orders would meet the books its
+live orders change, so it is no longer streamed here. It reads Kalshi's windows just after each
 quarter hour and every REFRESH_SECONDS, and every STRIKE_SECONDS while the window trading has no strike yet. Once a window
 opens it reads the window's tracking variance from the recorded quotes, and, when the trader started after the window
 opened, its offset, see trader.recorded_offset(). Every VARIANCE_SECONDS it reads Coinbase's minutes again for the
@@ -102,8 +103,8 @@ async def refresh(trader, streams, db_path):
     """
     Price Kalshi's windows closing from now to LOOKAHEAD_SECONDS ahead, with Hyperliquid's markets of them as it lists
     them, stream their books on each venue traded, and read the tracking variance of each opened with its strike, and its
-    offset when the trader has no readings from before it opened. The books of windows closed are dropped from the
-    streams, all but Hyperliquid's perp, whose marks keep its connection from going quiet.
+    offset when the trader has no readings from before it opened, when it prices with the model. The books of windows
+    closed are dropped from the streams, all but Hyperliquid's perp, whose marks keep its connection from going quiet.
     """
     now = time.time()
     found = [m for m in await asyncio.to_thread(kalshi.windows, SERIES, now - WINDOW_SECONDS, now + LOOKAHEAD_SECONDS) if m.close_time > now]
@@ -116,6 +117,8 @@ async def refresh(trader, streams, db_path):
             names |= set(hyperliquid.UNDERLYINGS)
         stream.add(names)
         stream.remove(stream.wanted - names)
+    if not trader.needs_model():
+        return
     for w in trader.windows.values():
         if w.tracking is None and w.market.strike is not None and w.market.open_time <= now < w.market.close_time:
             w.tracking = await asyncio.to_thread(read_tracking, db_path, w.market, trader.errors)
@@ -210,9 +213,6 @@ async def trade(db_path=None, seconds=None, log=log):
             [], lambda t, b, a, s: trader.on_book("polymarket_us", t, b, a, s), lambda start, end, ids: trader.on_gap("polymarket_us", ids), log)
     else:
         log(f"no Polymarket US API key in {polymarket_us.KEY_ID_FILE.parent}, so Polymarket US is not traded")
-    venue_streams["hyperliquid"] = hyperliquid.HyperliquidBookStream(list(hyperliquid.UNDERLYINGS),
-                                                                     lambda t, b, a, s: trader.on_book("hyperliquid", t, b, a, s),
-                                                                     lambda start, end, ids: trader.on_gap("hyperliquid", ids), log)
     trader.venues = tuple(venue_streams)
     for venue, stream in venue_streams.items():
         stream.depth = trader.depth

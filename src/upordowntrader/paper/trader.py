@@ -32,6 +32,17 @@ Hyperliquid's window's market is found in its list, see name_windows(). Opening 
 may take at settlement, see SETTLE_FEES, is counted in the edge, the chance the side pays times the fee on its dollar, see
 venue_edge(), and taken from the profit as the window settles.
 
+From 2026-10-18 Hyperliquid is traded with real money, by live/run.py, and no longer on paper, as its paper orders would
+meet the books its live orders change. The same trader decides its orders by the same rule, on the venues it is told are
+live, see PaperTrader.live, with four differences: orders only in the last LIVE_MAX_LEFT seconds, from 300 to 60 seconds
+before the close, where its paper orders had made +35.3 +/- 14.0 cents a contract over 20 windows since 2026-10-16 16:15
+UTC, against losses before; whole contracts; none worth under the venue's MIN_ORDER_DOLLARS at its limit; and none on a
+book that reached the trader STALE_SECONDS or more after the venue made it, as when the process was held up. An order the
+rule calls for then waits for the next change of the venue's book, the episode kept. A live order goes out through
+PaperTrader.send, and its side sends no other until its answer and FEED_SECONDS more, so the book shows what it took,
+see on_answer(). Nothing is filled on paper there, and no live order goes out while live trading has halted, see
+live/brakes.py. Its opportunities are recorded as the live rule trades, in the last LIVE_MAX_LEFT seconds alone.
+
 An order reaches its venue ORDER_SECONDS after it is decided, the 90th percentile of PredictionArbitrageTrader's live
 orders from the same AWS region, and fills against the newest book the venue made by then: the trader waits for a book
 the venue made later, which shows every change before has reached us, or FEED_SECONDS. A side sends no order while its
@@ -77,6 +88,10 @@ THRESHOLDS = {"kalshi": 0.02, "polymarket_us": 0.02, "hyperliquid": 0.02}
 CONTRACTS = 50              # The most contracts an order takes.
 WINDOW_CONTRACTS = 250      # The most contracts the trader buys of one window on one venue, both sides together.
 MIN_LEFT = {"kalshi": 300, "polymarket_us": 60, "hyperliquid": 60}      # Seconds before the close the last order may be decided.
+LIVE_MAX_LEFT = {"hyperliquid": 300}    # Seconds before the close the first live order may be decided, on each venue traded live.
+MIN_ORDER_DOLLARS = {"hyperliquid": hyperliquid.MIN_ORDER_DOLLARS}     # The least a live order may be worth at its limit.
+STALE_SECONDS = 1.0         # The oldest a venue's book may be, by its own time, when a live order is decided on it. Hyperliquid's
+                            # reach us 0.33 s after it makes them, 0.39 s at the 90th percentile, as the recorder sees.
 KALSHI_MID_VENUES = ("polymarket_us", "hyperliquid")    # Traded against Kalshi's mid, on their own book's changes alone.
 MAX_SPREAD = 0.10           # The widest Kalshi spread whose mid KALSHI_MID_VENUES are traded against.
 DEPTH = 10                  # Levels a side the trader keeps of each book.
@@ -277,8 +292,9 @@ def tracking_variance(conn, market, errors):
 
 class PaperTrader:
     """
-    Prices the window trading from what the streams pass on, and decides, fills, and stores paper orders, see the module's
-    docstring. paper/run.py feeds it the windows, the variance forecast, and the fit, and settles its orders.
+    Prices the window trading from what the streams pass on, and decides, fills, and stores paper orders, or sends live
+    ones, see the module's docstring. paper/run.py feeds it the windows, the variance forecast, and the fit, and settles its
+    orders, and live/run.py the windows of the venues it trades live.
     """
 
     def __init__(self, conn, log=print, clock=time.time, thresholds=THRESHOLDS, contracts=CONTRACTS, window_contracts=WINDOW_CONTRACTS,
@@ -291,7 +307,11 @@ class PaperTrader:
         self.window_contracts = window_contracts
         self.depth = depth
         self.feeds = {}             # The streams by name, a venue or an exchange, whose ws is None while down. One without counts as up.
-        self.venues = VENUES        # The venues traded.
+        self.venues = VENUES        # The venues streamed.
+        self.traded = set(VENUES)   # Those of them traded: Kalshi is streamed for its mid alone where it is not.
+        self.live = set()           # Those traded with real money, whose orders go out through send.
+        self.send = None            # Sends a live order, a dict as consider() makes one, and answers by on_answer().
+        self.live_halted = lambda: None     # Why live trading has halted, or None while it trades, see live/brakes.py.
         self.mids = {}              # Each exchange's newest mid.
         self.readings = {}          # The price known as each whole second began, by the second.
         self.second = None          # The last whole second readings were stored to.
@@ -435,14 +455,23 @@ class PaperTrader:
         """
         return next((w for w in self.windows.values() if w.market.open_time <= now < w.market.close_time), None)
 
+    def needs_model(self):
+        """
+        Whether a venue traded is priced with the model, which the venues traded against Kalshi's mid alone are not.
+        """
+        return any(v not in KALSHI_MID_VENUES for v in self.venues if v in self.traded)
+
     def trading(self, now):
         """
         The window trading at now with its strike, tracking variance, and offset known, or None. The offset is known a
         second after the open, from the readings of the minute before, see the module's docstring. A window without any,
-        opened before the trader started, waits for paper/run.py to read it from the recorder's quotes.
+        opened before the trader started, waits for paper/run.py to read it from the recorder's quotes. Without the model,
+        see needs_model(), the window open at now.
         """
         w = self.opened(now)
-        if w is None or w.market.strike is None or w.tracking is None:
+        if w is None or not self.needs_model():
+            return w
+        if w.market.strike is None or w.tracking is None:
             return None
         if w.offset is None and now >= w.market.open_time + 1:
             known = [r for r in (self.readings.get(s, math.nan) for s in range(w.market.open_time - 59, w.market.open_time + 1)) if math.isfinite(r)]
@@ -468,24 +497,31 @@ class PaperTrader:
     def price(self, now):
         """
         The window trading and what its fair price was made from at now, {price, model, mid, fair}, or None when it cannot
-        be priced: no window with all it needs, no fit or variance forecast yet, no more left than any venue trades to, see
-        MIN_LEFT, or no Kalshi book. kalshi_mid is Kalshi's mid when both its sides are quoted within MAX_SPREAD, else None.
+        be priced: no window with all it needs, no fit or variance forecast yet, no more left than any venue traded trades
+        to, see MIN_LEFT, or no Kalshi book. kalshi_mid is Kalshi's mid when both its sides are quoted within MAX_SPREAD,
+        else None. Without the model, see needs_model(), the price, the model, and the fair price are NaN.
         """
         w = self.trading(now)
-        if w is None or self.fit is None or self.variance is None or w.market.close_time - now <= min(MIN_LEFT[v] for v in self.venues):
+        traded = [v for v in self.venues if v in self.traded]
+        if w is None or not traded or w.market.close_time - now <= min(MIN_LEFT[v] for v in traded):
+            return None
+        modeled = self.needs_model()
+        if modeled and (self.fit is None or self.variance is None):
             return None
         kalshi = self.books.get(("kalshi", w.names["kalshi"]))
         mid = book_mid(kalshi) if kalshi is not None and self.up("kalshi") else None
         if mid is None:
             return None
-        price = self.stand_in() - w.offset
-        model = self.model_chance(w, price, now)
-        if not math.isfinite(model):
-            return None
+        price = model = fair_price = math.nan
+        if modeled:
+            price = self.stand_in() - w.offset
+            model = self.model_chance(w, price, now)
+            if not math.isfinite(model):
+                return None
+            fair_price = float(fair.blended(mid, model, w.market.close_time - now, self.fit))
         bids, asks = kalshi
         strict = (bids[0][0] + asks[0][0]) / 2 if bids and asks and asks[0][0] - bids[0][0] <= MAX_SPREAD else None
-        return w, {"price": price, "model": model, "mid": mid, "fair": float(fair.blended(mid, model, w.market.close_time - now, self.fit)),
-                   "kalshi_mid": strict}
+        return w, {"price": price, "model": model, "mid": mid, "fair": fair_price, "kalshi_mid": strict}
 
     def up_chance(self, venue, seen):
         """
@@ -510,9 +546,13 @@ class PaperTrader:
         if changed is not None:
             cause = changed[0] if changed in w.names.items() else "other"
         for venue, ticker in w.names.items():
+            if venue not in self.traded:
+                continue
             book = self.books.get((venue, ticker))
             up = self.up_chance(venue, seen)
-            if book is None or up is None or not self.up(venue) or (venue, ticker) in self.halted or w.market.close_time - now <= MIN_LEFT[venue]:
+            left = w.market.close_time - now
+            early = venue in self.live and left > LIVE_MAX_LEFT.get(venue, math.inf)
+            if book is None or up is None or not self.up(venue) or (venue, ticker) in self.halted or left <= MIN_LEFT[venue] or early:
                 self.end_opportunities(now, (venue, ticker))
                 continue
             for side in ("yes", "no"):
@@ -553,6 +593,7 @@ class PaperTrader:
         row = o.row(now, self.thresholds[o.venue])
         if o.own_book and row["take_size"] is None:
             return
+        row["mode"] = "live" if o.venue in self.live else "paper"
         self.finished.append(row)
         if (row["take_profit"] or 0) >= LOG_PROFIT_DOLLARS:
             self.log(f"opportunity {o.venue} {o.side} {o.ticker}: {100 * row['peak_edge']:.1f}c x {row['peak_size']:,.0f} = "
@@ -597,13 +638,22 @@ class PaperTrader:
         offered = replay.untaken([(p, c) for p, c in levels if venue_edge(venue, chance, p) >= least], self.taken.get(key, {}))
         if room <= 1e-9 or not offered:
             return
+        limit, size = max(p for p, _ in offered), min(self.contracts, room)
+        live = venue in self.live
+        if live:
+            size, book_at = math.floor(size + 1e-9), self.tapes[(venue, ticker)][-1][0]
+            if self.live_halted() or size * limit < MIN_ORDER_DOLLARS[venue] - 1e-9 or now - book_at >= STALE_SECONDS:
+                return                      # Halted, too small for the venue, or on a book read late: the episode waits.
         self.armed[key] = False
         arrived = now + ORDER_SECONDS[venue]
-        self.busy[key] = arrived + FEED_SECONDS[venue]
-        self.pending.append({"venue": venue, "ticker": ticker, "close_time": w.market.close_time, "decided": now, "side": side, **seen, "fair": up,
-                             "edge": venue_edge(venue, chance, levels[0][0]), "limit_price": max(p for p, _ in offered),
-                             "offered": sum(c for _, c in offered), "arrived": arrived, "cause": cause, "chance": chance,
-                             "size": min(self.contracts, room)})
+        self.busy[key] = math.inf if live else arrived + FEED_SECONDS[venue]     # A live order's side waits for its answer.
+        order = {"venue": venue, "ticker": ticker, "close_time": w.market.close_time, "decided": now, "side": side, **seen, "fair": up,
+                 "edge": venue_edge(venue, chance, levels[0][0]), "limit_price": limit, "offered": sum(c for _, c in offered),
+                 "arrived": arrived, "cause": cause, "chance": chance, "size": size}
+        self.pending.append(order)
+        if live:
+            order.update(mode="live", book_at=book_at)
+            self.send(order)
 
     def room(self, venue, ticker):
         """
@@ -615,9 +665,9 @@ class PaperTrader:
 
     def fill_due(self, now):
         """
-        Fill each order whose venue's book at its arrival is known: a later book has come, or FEED_SECONDS have passed.
+        Fill each paper order whose venue's book at its arrival is known: a later book has come, or FEED_SECONDS have passed.
         """
-        for order in [o for o in self.pending if self.known(o, now)]:
+        for order in [o for o in self.pending if o.get("mode") != "live" and self.known(o, now)]:
             self.pending.remove(order)
             self.fill(order)
 
@@ -660,6 +710,18 @@ class PaperTrader:
                  f"{order['offered']:g} offered to {order['limit_price']:.2f}, {took}")
         if contracts and held >= self.window_contracts - 1e-9:
             self.log(f"paper {venue} {order['ticker']} holds {held:g} contracts, the window's cap, so it takes no more")
+
+    def on_answer(self, order, filled):
+        """
+        Note what a live order sent, see consider(), filled: the window's contracts held count it, and its side may send
+        another once FEED_SECONDS have passed, as the book shows what it took by then.
+        """
+        self.pending = [o for o in self.pending if o is not order]
+        venue, ticker, side = order["venue"], order["ticker"], order["side"]
+        held = self.held[(venue, ticker)] = self.held.get((venue, ticker), 0.0) + filled
+        self.busy[(venue, ticker, side)] = self.clock() + FEED_SECONDS[venue]
+        if filled and held >= self.window_contracts - 1e-9:
+            self.log(f"live {venue} {ticker} holds {held:g} contracts, the window's cap, so it takes no more")
 
     # TIME
 

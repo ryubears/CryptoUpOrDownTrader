@@ -19,10 +19,15 @@ outlasted an order's trip to the venue, see trader.ORDER_SECONDS, how often the 
 rather than the fair price's, by minutes left, and the largest. The profits are the fair price's expectation, not locked
 in, until the windows settle: then what each one actually made beside it, and that over its cost.
 
+Paper and live trading are reported apart, each with its own opportunities, see opportunities.mode in schema.sql: the
+paper orders, and the live trades, read as the paper orders are, see live_order(), their contracts at the average price
+Hyperliquid filled them at, top of book included. --mode picks one.
+
 Run from src/ with:
     python3 -m upordowntrader.paper.report
     python3 -m upordowntrader.paper.report --hours 24
     python3 -m upordowntrader.paper.report --since 2026-10-14T01:00
+    python3 -m upordowntrader.paper.report --mode live
 """
 
 import argparse
@@ -45,7 +50,7 @@ LEGEND = ("",
           "  made         what each did make once its window settled, +/- two standard errors that count each window once, as a",
           "               window's orders win or lose together: a gap to expected smaller than that is noise",
           "  top of book  what each order would have made had it bought one contract alone, at the best price it got: the edge",
-          "               without the deeper levels a larger order walks into",
+          "               without the deeper levels a larger order walks into. A live order's is at the average price it got",
           "  profit       dollars made in all",
           "  on its book, on Kalshi's book, on an exchange, on the clock: what brought the decision, a change of the venue's own",
           "               book, of Kalshi's, an exchange's quote moving the model, or time alone moving it")
@@ -101,17 +106,40 @@ def capital(order):
     return order["contracts"] * (order["cost"] or 0.0) + order["fees"]
 
 
-def report(orders, log=print, windows=None):
+def live_order(trade, settlement):
     """
-    Print the report of the paper orders, as dicts of the paper_orders columns. windows is how many windows the trader
-    priced over the time, see priced(), by default those the orders were in.
+    A live trade, a dict of the trades columns, with its settlement, one of the settlements or None before it, as the
+    report reads a paper order: its contracts filled at their average price, what the chance it was decided on expected
+    of them, and, once settled, what they made.
+    """
+    filled = trade["filled"]
+    price = (trade["cost"] - trade["fees"]) / filled if filled else None
+    return {"venue": trade["venue"], "ticker": trade["ticker"], "close_time": trade["close_time"], "decided": trade["signal_ts"],
+            "side": trade["side"], "edge": trade["edge"], "contracts": filled, "cost": price, "best": price, "fees": trade["fees"],
+            "expected": filled * venue_edge(trade["venue"], trade["fair"], price) if filled else 0.0, "cause": trade["cause"],
+            "result": settlement["result"] if settlement else None, "profit": settlement["profit"] if settlement else None}
+
+
+def live_orders(conn, since=0.0):
+    """
+    The live trades decided from since, in seconds since 1970, as the report reads paper orders, oldest first.
+    """
+    settled = {s["trade_id"]: s for s in database.load_settlements(conn)}
+    return [live_order(t, settled.get(t["id"])) for t in database.load_trades(conn, "mode = 'live' AND signal_ts >= ?", (since,))]
+
+
+def report(orders, log=print, windows=None, kind="paper"):
+    """
+    Print the report of the orders of a kind, 'paper' or 'live', as dicts of the paper_orders columns, see live_order().
+    windows is how many windows the trader priced over the time, see priced(), by default those the orders were in.
     """
     if not orders:
-        log("no paper orders yet, run upordowntrader.paper.run for a while")
+        log("no paper orders yet, run upordowntrader.paper.run for a while" if kind == "paper" else
+            "no live orders yet, see upordowntrader.live.run")
         return
     settled = [o for o in orders if o["result"]]
     first, last = (datetime.fromtimestamp(orders[i]["decided"], UTC) for i in (0, -1))
-    log(f"\n{len(orders)} paper orders from {first:%Y-%m-%d %H:%M} to {last:%Y-%m-%d %H:%M} UTC, {len(settled)} settled, "
+    log(f"\n{len(orders)} {kind} orders from {first:%Y-%m-%d %H:%M} to {last:%Y-%m-%d %H:%M} UTC, {len(settled)} settled, "
         f"{sum(o['contracts'] > 0 for o in orders)} filled")
     header = (f"{'':>16}{'orders':>8}{'filled':>8}{'windows':>9}{'contracts':>11}{'expected':>11}{'made':>16}{'top of book':>16}{'profit':>11}\n"
               f"{'':>52}{'c/contract':>11}{'c/contract':>16}{'c/contract':>16}{'$':>11}")
@@ -283,10 +311,16 @@ if __name__ == "__main__":
     ap.add_argument("--db", help="the database the orders are in, by default data/history.sqlite")
     ap.add_argument("--hours", type=float, help="only the last this many hours, by default everything")
     ap.add_argument("--since", type=utc_time, help="only from this time, in UTC, as 2026-10-14T01:00, such as since a change of the rule")
+    ap.add_argument("--mode", choices=("paper", "live", "all"), default="all", help="paper trading, live trading, or both, by default both")
     args = ap.parse_args()
     conn = database.connect(args.db)
     since = max(time.time() - 3600 * args.hours if args.hours else 0.0, args.since or 0.0)
     label = f"since {datetime.fromtimestamp(since, UTC):%Y-%m-%d %H:%M} UTC" if since else "since the first"
-    opportunities = database.load_opportunities(conn, since)
-    report([o for o in database.load_paper_orders(conn) if o["decided"] >= since], windows=priced(opportunities) or None)
-    report_opportunities(opportunities, label)
+    for kind in ("paper", "live") if args.mode == "all" else (args.mode,):
+        opportunities = database.load_opportunities(conn, since, kind)
+        orders = [o for o in database.load_paper_orders(conn) if o["decided"] >= since] if kind == "paper" else live_orders(conn, since)
+        if args.mode == "all" and kind == "live" and not orders and not opportunities:
+            continue                                # No live trading yet.
+        print(f"\n==== {kind} trading")
+        report(orders, windows=priced(opportunities) or None, kind=kind)
+        report_opportunities(opportunities, label)

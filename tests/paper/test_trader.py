@@ -414,3 +414,79 @@ def test_the_open_opportunities_are_stored_as_the_trader_stops_and_a_halted_mark
     assert [(o["venue"], o["end_time"]) for o in opportunities(t)] == [("polymarket_us", clock.now)]
     t.stop(clock.now + 1)
     assert sorted((o["venue"], o["end_time"]) for o in opportunities(t)) == [("kalshi", clock.now + 1), ("polymarket_us", clock.now)]
+
+
+def live(tmp_path, now=CLOSE - 400.0):
+    """
+    A trader as live/run.py makes one, trading Hyperliquid alone with real money at the rule's sizes, without the model:
+    no fit, no variance forecast, no exchange quotes. Its orders go to the list it returns.
+    """
+    clock = Clock(now)
+    logs, sent = [], []
+    t = paper.PaperTrader(database.connect(tmp_path / "history.sqlite"), logs.append, clock)
+    t.venues, t.traded, t.live, t.send = ("kalshi", "hyperliquid"), {"hyperliquid"}, {"hyperliquid"}, sent.append
+    t.set_windows([Market("kalshi", "K", "K", "KXBTC15M", OPEN, CLOSE, None, None, None, None)])
+    listed(t)
+    return t, clock, sent, logs
+
+
+def test_live_hyperliquid_trades_its_last_five_minutes_without_the_model_and_waits_for_each_answer(tmp_path):
+    t, clock, sent, _ = live(tmp_path)
+    t.on_book("kalshi", "K", [[0.52, 10.0]], [[0.54, 10.0]], clock.now)     # Kalshi's mid is 53c,
+    t.on_book("hyperliquid", "#1230", [[0.40, 20.0]], [[0.48, 80.0]], clock.now)   # Hyperliquid's Yes 48c: an edge, too early.
+    assert not sent and not t.opportunities
+    step(t, clock, CLOSE - 250.0)
+    t.on_book("kalshi", "K", [[0.52, 10.0]], [[0.54, 10.0]], clock.now)
+    t.on_book("hyperliquid", "#1230", [[0.41, 20.0]], [[0.48, 80.0]], clock.now - 0.3)   # Its own book changes in the last 5 minutes.
+    (order,) = sent
+    assert (order["mode"], order["side"], order["size"], order["limit_price"], order["chance"]) == ("live", "yes", 50, 0.48, 0.53)
+    assert order["book_at"] == clock.now - 0.3 and order["cause"] == "hyperliquid" and t.pending == [order]
+    assert t.room("hyperliquid", "#1230") == 200                            # In flight, it counts against the window's cap.
+    step(t, clock, clock.now + 5)
+    t.on_book("hyperliquid", "#1230", [[0.42, 20.0]], [[0.48, 80.0]], clock.now)
+    assert len(sent) == 1 and not database.load_paper_orders(t.conn)        # Nothing more before its answer, nor filled on paper.
+    t.on_answer(order, 30.0)
+    assert t.held[("hyperliquid", "#1230")] == 30.0 and not t.pending and t.room("hyperliquid", "#1230") == 220
+    t.on_book("kalshi", "K", [[0.44, 10.0]], [[0.46, 10.0]], clock.now)     # The edge goes, ending its episode,
+    t.on_book("kalshi", "K", [[0.52, 10.0]], [[0.54, 10.0]], clock.now)     # and comes back, for a change of its own book
+    t.on_book("hyperliquid", "#1230", [[0.43, 20.0]], [[0.48, 50.0]], clock.now)   # until its side's last answer has had time to show:
+    assert len(sent) == 1
+    clock.now += paper.FEED_SECONDS["hyperliquid"]
+    t.on_book("hyperliquid", "#1230", [[0.44, 20.0]], [[0.48, 50.0]], clock.now)
+    assert len(sent) == 2 and sent[1]["size"] == 50
+    t.stop(clock.now)
+    found = [o for o in opportunities(t) if o["side"] == "yes"]             # Before the edge went, and after it came back,
+    assert len(found) == 2 and all(o["mode"] == "live" and o["start_time"] >= CLOSE - 300 for o in found)    # in the last 5 minutes.
+
+
+def test_live_hyperliquid_sends_no_order_under_ten_dollars_on_a_late_book_or_while_halted_and_the_episode_waits(tmp_path):
+    t, clock, sent, _ = live(tmp_path, CLOSE - 250.0)
+    t.on_book("kalshi", "K", [[0.20, 10.0]], [[0.22, 10.0]], clock.now)     # Kalshi's mid 21c,
+    t.on_book("hyperliquid", "#1230", [[0.05, 20.0]], [[0.18, 80.0]], clock.now)   # Yes at 18c: 50 of them are worth $9.
+    assert not sent
+    t.on_book("hyperliquid", "#1230", [[0.05, 20.0]], [[0.18, 80.0], [0.19, 80.0]], clock.now)   # At 19c the worst within 2c: $9.50.
+    assert not sent
+    t.on_book("kalshi", "K", [[0.28, 10.0]], [[0.30, 10.0]], clock.now)     # Kalshi's mid 29c, so 20c is within the edge too:
+    t.on_book("hyperliquid", "#1230", [[0.05, 20.0]], [[0.18, 80.0], [0.20, 80.0]], clock.now - paper.STALE_SECONDS)   # but on a late book,
+    assert not sent
+    halted = "live_halt.txt is there"
+    t.live_halted = lambda: halted
+    t.on_book("hyperliquid", "#1230", [[0.06, 20.0]], [[0.18, 80.0], [0.20, 80.0]], clock.now)   # and while halted, none.
+    assert not sent
+    halted = None
+    t.on_book("hyperliquid", "#1230", [[0.07, 20.0]], [[0.18, 80.0], [0.20, 80.0]], clock.now)   # The same episode, once trading again.
+    assert [(o["size"], o["limit_price"]) for o in sent] == [(50, 0.20)]
+
+
+def test_a_live_order_is_sized_in_whole_contracts_to_what_the_windows_cap_leaves(tmp_path):
+    t, clock, sent, _ = live(tmp_path, CLOSE - 250.0)
+    t.held[("hyperliquid", "#1230")] = 212.0
+    t.on_book("kalshi", "K", [[0.52, 10.0]], [[0.54, 10.0]], clock.now)
+    t.on_book("hyperliquid", "#1230", [[0.40, 20.0]], [[0.48, 80.0]], clock.now)
+    assert [o["size"] for o in sent] == [38]                                # 38 at 48c, $18.24.
+    t.on_answer(sent[0], 38.0)
+    t.on_book("kalshi", "K", [[0.44, 10.0]], [[0.46, 10.0]], clock.now)
+    clock.now += 1
+    t.on_book("kalshi", "K", [[0.52, 10.0]], [[0.54, 10.0]], clock.now)
+    t.on_book("hyperliquid", "#1230", [[0.41, 20.0]], [[0.48, 80.0]], clock.now)
+    assert len(sent) == 1                                                   # The cap is reached.

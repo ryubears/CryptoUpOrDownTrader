@@ -67,6 +67,9 @@ SETTLE_FEE_RATE = 0.0007    # What Hyperliquid may take of a winning contract's 
                             # reads its own, see user_fees().
 ORDER_TIMEOUT = 10          # Seconds an order's answer may take.
 SIGNIFICANT = 5             # The most significant figures a price may have.
+MIN_ORDER_DOLLARS = 10.0    # The least an order may be worth, contracts times its limit on the side's own coin, as outcome orders
+                            # resting on 2026-10-18 showed: 1% of 1,080 were under it either way, remainders of orders partly
+                            # filled, against 20% under it by the Yes price alone. Sizes are whole contracts.
 DOMAIN = {"chainId": 1337, "name": "Exchange", "verifyingContract": "0x0000000000000000000000000000000000000000", "version": "1"}
 AGENT_TYPES = {"Agent": [{"name": "source", "type": "string"}, {"name": "connectionId", "type": "bytes32"}],
                "EIP712Domain": [{"name": "name", "type": "string"}, {"name": "version", "type": "string"},
@@ -349,8 +352,11 @@ def answer(response, size):
     """
     What an order's answer says, as (status, contracts filled, their average price, Hyperliquid's id for the order, why
     not): status 'filled' or 'partial' for what an order took at once, 'resting' for one left on the book, 'unfilled'
-    for one that met nothing, 'rejected' for one refused, and 'error' for an answer that was not about the order.
+    for one that met nothing, 'rejected' for one refused, the order or the whole action, as from an API wallet not
+    approved, and 'error' for an answer that cannot be read, which leaves the order's outcome unknown.
     """
+    if isinstance(response, dict) and response.get("status") == "err":
+        return "rejected", 0.0, None, None, str(response.get("response"))[:500]
     if not isinstance(response, dict) or response.get("status") != "ok":
         return "error", 0.0, None, None, str(response)[:500]
     statuses = ((response.get("response") or {}).get("data") or {}).get("statuses") or [{}]
@@ -397,6 +403,29 @@ def balances(user):
     The account's spot balances, USDC among them, from which outcome orders are paid.
     """
     return info({"type": "spotClearinghouseState", "user": user})
+
+
+def usdc(state):
+    """
+    The USDC of an account's spot balances, see balances(), in dollars: 0 without any. The 15 minute markets are quoted in
+    USDC, outcomeMeta's quoteToken.
+    """
+    return next((float(b["total"]) for b in state.get("balances") or [] if b.get("coin") == "USDC"), 0.0)
+
+
+def perp_state(user):
+    """
+    The account's perp side: its value and what it could withdraw. A deposit lands there, and is moved to the spot side
+    on Hyperliquid before outcome orders can use it, unless the account's spot and perp sides are one.
+    """
+    return info({"type": "clearinghouseState", "user": user})
+
+
+def agents(user):
+    """
+    The API wallets the account approved, each with its address, name, and when it lapses, in milliseconds.
+    """
+    return info({"type": "extraAgents", "user": user})
 
 
 def open_orders(user):

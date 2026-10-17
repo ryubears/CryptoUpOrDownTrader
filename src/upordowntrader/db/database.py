@@ -17,6 +17,7 @@ One database file holds every table:
     trades   each decision to trade with real money, or its paper twin, by live/executor.py
     orders   every real order sent to a venue, by live/executor.py
     settlements  how each trade paid out, by live/executor.py
+    alerts   what live trading told a human, by live/notify.py
 
 The tables themselves are in schema.sql. This file holds the reads and writes.
 """
@@ -39,7 +40,9 @@ ADDED_COLUMNS = (("paper_orders", "cause", "TEXT", None),
                  ("opportunities", "min_edge_total", "REAL", None),
                  ("opportunities", "result", "TEXT", None),
                  ("opportunities", "actual_profit", "REAL", None),
-                 ("opportunities", "actual_return_pct", "REAL", None))
+                 ("opportunities", "actual_return_pct", "REAL", None),
+                 ("opportunities", "mode", "TEXT NOT NULL DEFAULT 'paper'", None),
+                 ("trades", "cause", "TEXT", None))
 # Indexes on such columns, made once they are there.
 ADDED_INDEXES = ("CREATE INDEX IF NOT EXISTS idx_opportunities_unsettled ON opportunities (result, close_time)",)
 DROPPED_COLUMNS = (("opportunities", "annual_pct"),)    # Columns schema.sql lost after its table had rows, as (table, column).
@@ -281,25 +284,28 @@ def load_paper_orders(conn):
 OPPORTUNITY_COLUMNS = ("venue", "ticker", "close_time", "side", "start_time", "end_time", "seconds", "peak_time", "peak_edge", "peak_price",
                        "peak_fair", "peak_size", "peak_capital", "peak_profit", "book_changed", "days_held", "return_pct",
                        "min_edge", "min_edge_seconds", "min_edge_size", "min_edge_capital", "min_edge_profit", "take_size", "take_capital",
-                       "take_profit", "take_return_pct", "min_edge_total")
+                       "take_profit", "take_return_pct", "min_edge_total", "mode")
 OUTCOME_COLUMNS = ("result", "actual_profit", "actual_return_pct")      # Set as the window settles, see settle_opportunities().
 
 
 def store_opportunities(conn, rows):
     """
-    Store opportunities, each a dict with the opportunities columns, in one transaction.
+    Store opportunities, each a dict with the opportunities columns, in one transaction: mode 'paper' unless one says.
     """
+    rows = [{**row, "mode": row.get("mode") or "paper"} for row in rows]
     with conn:
         conn.executemany(f"INSERT OR REPLACE INTO opportunities ({', '.join(OPPORTUNITY_COLUMNS)}) "
                          f"VALUES ({', '.join(':' + n for n in OPPORTUNITY_COLUMNS)})", rows)
 
 
-def load_opportunities(conn, since=0.0):
+def load_opportunities(conn, since=0.0, mode=None):
     """
-    The opportunities starting from since, in seconds since 1970, as dicts of the opportunities columns, oldest first.
+    The opportunities starting from since, in seconds since 1970, as dicts of the opportunities columns, oldest first: of
+    one mode, 'paper' or 'live', or of both without.
     """
     names = (*OPPORTUNITY_COLUMNS, *OUTCOME_COLUMNS)
-    rows = conn.execute(f"SELECT {', '.join(names)} FROM opportunities WHERE start_time >= ? ORDER BY start_time", (since,)).fetchall()
+    rows = conn.execute(f"SELECT {', '.join(names)} FROM opportunities WHERE start_time >= ? AND mode = COALESCE(?, mode) ORDER BY start_time",
+                        (since, mode)).fetchall()
     return [dict(zip(names, row, strict=True)) for row in rows]
 
 
@@ -320,7 +326,7 @@ def settle_opportunities(conn, venue, ticker, result, settle_fee=0.0):
 # TRADES, ORDERS, AND SETTLEMENTS
 
 TRADE_COLUMNS = ("id", "mode", "venue", "ticker", "close_time", "side", "signal_ts", "fair", "edge", "quantity", "limit_price", "filled",
-                 "cost", "fees", "status", "pays_at")
+                 "cost", "fees", "status", "pays_at", "cause")
 ORDER_COLUMNS = ("id", "trade_id", "venue", "ticker", "coin", "action", "outcome", "quantity", "limit_price", "tif", "client_id", "sent_at",
                  "status", "venue_order_id", "answered_at", "latency_ms", "filled", "dollars", "fees", "note", "response", "book_at", "book_ts")
 SETTLEMENT_COLUMNS = ("trade_id", "mode", "settled_at", "result", "payout", "fees", "profit")
@@ -375,12 +381,23 @@ def load_orders(conn, trade_id):
 
 def open_trades(conn, venue=None, ticker=None, now=None):
     """
-    The trades that hold contracts and have not settled, of one market or of every market closed by now.
+    The trades that hold contracts and have not settled, of one market, of every market closed by now, or of every market
+    without either.
     """
-    where = "filled > 0 AND id NOT IN (SELECT trade_id FROM settlements)"
+    return unsettled_trades(conn, venue, ticker, now, held=True)
+
+
+def unsettled_trades(conn, venue=None, ticker=None, now=None, held=False):
+    """
+    The trades that have not settled, those that filled nothing too unless held, of one market, of every market closed by
+    now, or of every market without either.
+    """
+    where = "id NOT IN (SELECT trade_id FROM settlements)" + (" AND filled > 0" if held else "")
     if ticker is not None:
         return load_trades(conn, f"{where} AND venue = ? AND ticker = ?", (venue, ticker))
-    return load_trades(conn, f"{where} AND close_time <= ?", (now,))
+    if now is not None:
+        return load_trades(conn, f"{where} AND close_time <= ?", (now,))
+    return load_trades(conn, where)
 
 
 def store_settlement(conn, row):
@@ -398,3 +415,48 @@ def load_settlements(conn):
     """
     rows = conn.execute(f"SELECT {', '.join(SETTLEMENT_COLUMNS)} FROM settlements ORDER BY settled_at, trade_id").fetchall()
     return [dict(zip(SETTLEMENT_COLUMNS, row, strict=True)) for row in rows]
+
+
+def live_results(conn, since):
+    """
+    The live trades that filled and settled at or after since, in seconds since 1970, as dicts of their window's close
+    time, when they settled, and what they made, by when they settled.
+    """
+    rows = conn.execute("SELECT t.close_time, s.settled_at, s.profit FROM trades t JOIN settlements s ON s.trade_id = t.id "
+                        "WHERE t.mode = 'live' AND t.filled > 0 AND s.settled_at >= ? ORDER BY s.settled_at, t.id", (since,)).fetchall()
+    return [{"close_time": c, "settled_at": at, "profit": p} for c, at, p in rows]
+
+
+def recent_orders(conn, n, since=0.0):
+    """
+    The newest n orders sent at or after since, as (id, status), oldest first.
+    """
+    rows = conn.execute("SELECT id, status FROM orders WHERE sent_at >= ? ORDER BY id DESC LIMIT ?", (since, n)).fetchall()
+    return rows[::-1]
+
+
+# ALERTS
+
+ALERT_COLUMNS = ("id", "time", "kind", "subject", "body", "sent_at", "error")
+
+
+def store_alert(conn, alert):
+    """
+    Store an alert as it is raised, a dict with the alerts columns but its id, and return its id.
+    """
+    return insert(conn, "alerts", ALERT_COLUMNS, alert)
+
+
+def last_alert_time(conn, kind):
+    """
+    When the last alert of a kind was raised, in seconds since 1970, or None before any.
+    """
+    return conn.execute("SELECT MAX(time) FROM alerts WHERE kind = ?", (kind,)).fetchone()[0]
+
+
+def load_alerts(conn):
+    """
+    Every alert, as dicts of the alerts columns, oldest first.
+    """
+    rows = conn.execute(f"SELECT {', '.join(ALERT_COLUMNS)} FROM alerts ORDER BY id").fetchall()
+    return [dict(zip(ALERT_COLUMNS, row, strict=True)) for row in rows]

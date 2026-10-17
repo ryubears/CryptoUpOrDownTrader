@@ -73,3 +73,25 @@ def test_a_markets_opportunities_settle_once_with_what_their_take_made_less_a_ve
     assert [(o["result"], o["actual_profit"], o["actual_return_pct"]) for o in rows] == [
         ("yes", pytest.approx(10 * 0.999 - 5.0), pytest.approx(100 * (10 * 0.999 - 5.0) / 5.0)), ("yes", -5.0, -100.0), ("yes", None, None)]
     assert database.unsettled_markets(conn, 2000) == []
+
+
+def test_opportunities_and_trades_made_before_live_trading_gain_their_mode_and_cause(tmp_path):
+    path = tmp_path / "history.sqlite"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE opportunities (venue TEXT NOT NULL, ticker TEXT NOT NULL, close_time INTEGER NOT NULL, side TEXT NOT NULL, "
+                "start_time REAL NOT NULL, take_capital REAL, take_profit REAL, PRIMARY KEY (venue, ticker, side, start_time))")
+    old.execute("INSERT INTO opportunities VALUES ('kalshi', 'K', 1000, 'yes', 500.0, 5.0, 0.4)")
+    old.execute("CREATE TABLE trades (id INTEGER PRIMARY KEY, mode TEXT NOT NULL, venue TEXT NOT NULL, ticker TEXT NOT NULL)")
+    old.commit()
+    old.close()
+    conn = database.connect(path)
+    assert conn.execute("SELECT mode FROM opportunities").fetchall() == [("paper",)]       # Every one before was paper.
+    assert "cause" in {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
+
+
+def test_opportunities_are_read_by_mode(tmp_path):
+    conn = database.connect(tmp_path / "history.sqlite")
+    database.store_opportunities(conn, [opportunity(), {**opportunity(start=501.0), "mode": "live"}])
+    assert [o["mode"] for o in database.load_opportunities(conn)] == ["paper", "live"]
+    assert [o["start_time"] for o in database.load_opportunities(conn, mode="live")] == [501.0]
+    assert [o["start_time"] for o in database.load_opportunities(conn, 0.0, "paper")] == [500.0]

@@ -1,0 +1,27 @@
+# Live trading on Hyperliquid as a systemd service on the AWS instance, beside the recorder and the paper trader, installed
+# by deploy/setup.sh but neither enabled nor started: it sends real orders, so only a person starts it, once the account
+# and API wallet files and data/email.json are in data/, see live/run.py:
+#     sudo systemctl enable --now crypto-up-or-down-live
+# Runs as ubuntu from the repo's src/, restarts on any exit but a missing Hyperliquid file's, and appends what it prints
+# to data/logs/live.log. It runs at the recorder's priority, not the paper trader's lower one, so an order is not held up.
+# A stop sends SIGTERM, on which it waits for the order in flight, if any, and logs "stopped". To stop live trading for a
+# while without stopping the process, make data/live_halt.txt, see live/brakes.py.
+
+[Unit]
+Description=CryptoUpOrDownTrader live trading: real orders on Hyperliquid's BTC 15 minute windows
+Wants=network-online.target
+After=network-online.target time-sync.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/CryptoUpOrDownTrader/src
+ExecStart=/usr/bin/python3 -m upordowntrader.live.run
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=2
+TimeoutStopSec=30
+StandardOutput=append:/home/ubuntu/CryptoUpOrDownTrader/data/logs/live.log
+StandardError=append:/home/ubuntu/CryptoUpOrDownTrader/data/logs/live.log
+
+[Install]
+WantedBy=multi-user.target

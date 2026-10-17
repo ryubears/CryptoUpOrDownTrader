@@ -193,5 +193,6 @@ def test_an_order_goes_out_once_signed_and_its_answer_is_read(serve):
     assert body["signature"] == hyperliquid.signature(body["action"], body["nonce"], account)
     assert hyperliquid.answer(first, 10.0) == ("partial", 7.0, 0.531, 77, None)
     assert hyperliquid.answer(hyperliquid.place("#1230", True, 0.54, 10.0, account=account), 10.0)[0] == "unfilled"
-    assert hyperliquid.answer(hyperliquid.place("#1230", True, 0.54, 10.0, account=account), 10.0)[0] == "error"
+    assert hyperliquid.answer(hyperliquid.place("#1230", True, 0.54, 10.0, account=account), 10.0)[:2] == ("rejected", 0.0)
     assert len(sent) == 3                                       # Each sent once, an error not retried.
+    assert hyperliquid.answer("<html>502</html>", 10.0)[0] == "error"                  # An answer that cannot be read.
