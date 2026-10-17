@@ -14,9 +14,9 @@ trades of the windows Hyperliquid has settled, with their opportunities, then se
 see live/brakes.py, which emails a human when it does. A status line comes every STATUS_SECONDS.
 
 It needs the account's address and an approved API wallet's key in data/, see api/hyperliquid.py, Kalshi's API key for
-its books, and USDC on the account's spot side. Without the Hyperliquid files it exits at once with EXIT_MISSING, which
-its service does not restart on. With --dry-run nothing is sent: each order is logged and answered as filling nothing,
-and nothing is stored, neither trades nor opportunities.
+its books, and USDC on the account's spot side. Without them, or with a key file that holds no key, it exits at once
+with EXIT_MISSING, which its service does not restart on, see startup_problems(). With --dry-run nothing is sent: each
+order is logged and answered as filling nothing, and nothing is stored, neither trades nor opportunities.
 
 Run from src/ with:
     python3 -m upordowntrader.live.run --dry-run --seconds 900
@@ -230,6 +230,22 @@ async def until_stopped(seconds, db_path=None, dry_run=False):
     await trade(db_path, seconds, dry_run)
 
 
+def startup_problems(dry_run=False):
+    """
+    What keeps live trading from starting, in words, none when it can: Kalshi's key files, and unless a dry run, the
+    Hyperliquid account's address and an API wallet key that is one, see hyperliquid.key_problem(). Without this a bad
+    key would fail only at the first order, which would halt live trading as an order of unknown outcome.
+    """
+    problems = [f"no {path}" for path in (kalshi.KEY_ID_FILE, kalshi.PRIVATE_KEY_FILE) if not path.exists()]
+    if not dry_run:
+        if not hyperliquid.ACCOUNT_FILE.exists():
+            problems.append(f"no {hyperliquid.ACCOUNT_FILE}")
+        problem = hyperliquid.key_problem()
+        if problem:
+            problems.append(problem)
+    return problems
+
+
 # MAIN
 
 if __name__ == "__main__":
@@ -238,11 +254,9 @@ if __name__ == "__main__":
     ap.add_argument("--db", help="the database to store the trades in, by default data/history.sqlite")
     ap.add_argument("--dry-run", action="store_true", help="send nothing: log each order instead, and store nothing")
     args = ap.parse_args()
-    missing = [path for path in (kalshi.KEY_ID_FILE, kalshi.PRIVATE_KEY_FILE) if not path.exists()]
-    if not args.dry_run:
-        missing += [path for path in (hyperliquid.ACCOUNT_FILE, hyperliquid.AGENT_KEY_FILE) if not path.exists()]
-    if missing:
-        log(f"live trading cannot start, missing: {', '.join(str(p) for p in missing)}")
+    problems = startup_problems(args.dry_run)
+    if problems:
+        log(f"live trading cannot start: {'; '.join(problems)}")
         sys.exit(EXIT_MISSING)
     try:
         asyncio.run(until_stopped(args.seconds, args.db, args.dry_run))

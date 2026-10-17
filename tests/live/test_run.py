@@ -88,3 +88,20 @@ def test_settling_pays_the_trades_and_opportunities_hyperliquid_settled_then_rea
     assert s["profit"] == pytest.approx(10 * (1 - hyperliquid.SETTLE_FEE_RATE) - 4.0) and checked == [104.0]
     assert database.load_opportunities(conn, mode="live")[0]["actual_profit"] == pytest.approx(10 * (1 - hyperliquid.SETTLE_FEE_RATE) - 4.0)
     assert database.load_opportunities(conn, mode="paper") == []
+
+
+def test_live_trading_will_not_start_on_a_key_file_that_holds_an_address_and_says_so_without_showing_it(tmp_path, monkeypatch):
+    for name in ("ACCOUNT_FILE", "AGENT_KEY_FILE"):
+        monkeypatch.setattr(hyperliquid, name, tmp_path / f"{name.lower()}.txt")
+    for name in ("KEY_ID_FILE", "PRIVATE_KEY_FILE"):
+        monkeypatch.setattr(run.kalshi, name, tmp_path / f"kalshi_{name.lower()}")
+        (tmp_path / f"kalshi_{name.lower()}").write_text("x")
+    assert run.startup_problems(dry_run=True) == []
+    assert run.startup_problems() == [f"no {hyperliquid.ACCOUNT_FILE}", f"no {hyperliquid.AGENT_KEY_FILE}"]
+    address = "0x430c2808faccf318adcabb7d74ef507b49480d2d"
+    hyperliquid.ACCOUNT_FILE.write_text(address)
+    hyperliquid.AGENT_KEY_FILE.write_text(address + "\n")
+    (problem,) = run.startup_problems()
+    assert "an address's length" in problem and address[2:] not in problem
+    hyperliquid.AGENT_KEY_FILE.write_text("0x0123456789012345678901234567890123456789012345678901234567890123\n")    # The SDK's test key.
+    assert run.startup_problems() == []

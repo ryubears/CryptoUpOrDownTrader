@@ -238,6 +238,22 @@ def has_key():
     return ACCOUNT_FILE.exists() and AGENT_KEY_FILE.exists()
 
 
+def key_problem():
+    """
+    Why the API wallet's key in the data folder cannot sign, in words that never show what the file holds, or None when
+    it can: a private key is 32 bytes, 64 hex digits, and an address in its place is 20.
+    """
+    if not AGENT_KEY_FILE.exists():
+        return f"no {AGENT_KEY_FILE}"
+    try:
+        eth_account.Account.from_key(AGENT_KEY_FILE.read_text().strip())
+    except Exception:
+        size = len(AGENT_KEY_FILE.read_text().strip().removeprefix("0x"))
+        return (f"{AGENT_KEY_FILE.name} holds no private key: {size} characters where a key has 64 hex digits"
+                + (", an address's length, so it may be the API wallet's address" if size == 40 else ""))
+    return None
+
+
 def asset(coin):
     """
     The asset number an order names an outcome side by: OUTCOME_ASSETS plus the side's coin's number, 100001230 for '#1230'.

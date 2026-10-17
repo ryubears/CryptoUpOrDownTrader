@@ -164,12 +164,13 @@ def check(log=print, email=False):
     log(f"fees: {json.dumps({k: v for k, v in fees.items() if k != 'dailyUserVlm'})}")
     approved = hyperliquid.agents(user)
     log(f"API wallets: {json.dumps(approved)}")
-    if hyperliquid.AGENT_KEY_FILE.exists():
+    problem = hyperliquid.key_problem()
+    if problem is None:
         mine = hyperliquid.credentials()[1].address.lower()
         listed = any(isinstance(a, dict) and str(a.get("address", "")).lower() == mine for a in approved or [])
         log(f"the API wallet in {hyperliquid.AGENT_KEY_FILE.name}, {mine}, {'is' if listed else 'is NOT'} among them")
     else:
-        log(f"no API wallet key in {hyperliquid.AGENT_KEY_FILE}")
+        log(f"API wallet key: {problem}")
     log(f"open orders: {json.dumps(hyperliquid.open_orders(user))}")
     if email:
         from upordowntrader.live import notify
