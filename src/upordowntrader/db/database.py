@@ -42,7 +42,8 @@ ADDED_COLUMNS = (("paper_orders", "cause", "TEXT", None),
                  ("opportunities", "actual_profit", "REAL", None),
                  ("opportunities", "actual_return_pct", "REAL", None),
                  ("opportunities", "mode", "TEXT NOT NULL DEFAULT 'paper'", None),
-                 ("trades", "cause", "TEXT", None))
+                 ("trades", "cause", "TEXT", None),
+                 ("orders", "venue_at", "REAL", None))
 # Indexes on such columns, made once they are there.
 ADDED_INDEXES = ("CREATE INDEX IF NOT EXISTS idx_opportunities_unsettled ON opportunities (result, close_time)",)
 DROPPED_COLUMNS = (("opportunities", "annual_pct"),)    # Columns schema.sql lost after its table had rows, as (table, column).
@@ -328,7 +329,8 @@ def settle_opportunities(conn, venue, ticker, result, settle_fee=0.0):
 TRADE_COLUMNS = ("id", "mode", "venue", "ticker", "close_time", "side", "signal_ts", "fair", "edge", "quantity", "limit_price", "filled",
                  "cost", "fees", "status", "pays_at", "cause")
 ORDER_COLUMNS = ("id", "trade_id", "venue", "ticker", "coin", "action", "outcome", "quantity", "limit_price", "tif", "client_id", "sent_at",
-                 "status", "venue_order_id", "answered_at", "latency_ms", "filled", "dollars", "fees", "note", "response", "book_at", "book_ts")
+                 "status", "venue_order_id", "answered_at", "latency_ms", "filled", "dollars", "fees", "note", "response", "book_at", "book_ts",
+                 "venue_at")
 SETTLEMENT_COLUMNS = ("trade_id", "mode", "settled_at", "result", "payout", "fees", "profit")
 
 
@@ -425,6 +427,28 @@ def live_results(conn, since):
     rows = conn.execute("SELECT t.close_time, s.settled_at, s.profit FROM trades t JOIN settlements s ON s.trade_id = t.id "
                         "WHERE t.mode = 'live' AND t.filled > 0 AND s.settled_at >= ? ORDER BY s.settled_at, t.id", (since,)).fetchall()
     return [{"close_time": c, "settled_at": at, "profit": p} for c, at, p in rows]
+
+
+def untimed_orders(conn, since):
+    """
+    The orders sent at or after since that filled and have no venue time for it yet, as dicts of their id, the venue's id
+    for them, and when they were sent.
+    """
+    rows = conn.execute("SELECT id, venue_order_id, sent_at FROM orders WHERE filled > 0 AND venue_at IS NULL AND venue_order_id IS NOT NULL "
+                        "AND sent_at >= ? ORDER BY id", (since,)).fetchall()
+    return [{"id": i, "venue_order_id": v, "sent_at": s} for i, v, s in rows]
+
+
+def load_live_latency(conn, since=0.0):
+    """
+    The times of each live order decided at or after since, as dicts: when it was decided, the venue's time for the book
+    it was decided on and when that reached us, when it was sent, answered, and first filled by the venue's time, and the
+    contracts it filled.
+    """
+    names = ("signal_ts", "book_at", "book_ts", "sent_at", "answered_at", "venue_at", "filled")
+    rows = conn.execute("SELECT t.signal_ts, o.book_at, o.book_ts, o.sent_at, o.answered_at, o.venue_at, o.filled FROM orders o "
+                        "JOIN trades t ON t.id = o.trade_id WHERE t.mode = 'live' AND t.signal_ts >= ? ORDER BY o.id", (since,)).fetchall()
+    return [dict(zip(names, row, strict=True)) for row in rows]
 
 
 def recent_orders(conn, n, since=0.0):

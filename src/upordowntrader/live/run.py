@@ -49,6 +49,7 @@ LISTING_SECONDS = paper_run.LISTING_SECONDS
 BALANCE_SECONDS = 60
 SETTLE_SECONDS = 30
 STATUS_SECONDS = 300
+FILLS_SECONDS = 3600        # How far back the orders filled are timed by the account's fills, see settle().
 EXIT_MISSING = 2            # The exit status without the Hyperliquid files, which the service does not restart on.
 
 
@@ -117,6 +118,13 @@ def read_balance():
     return hyperliquid.usdc(hyperliquid.balances(hyperliquid.ACCOUNT_FILE.read_text().strip()))
 
 
+def read_fills(since):
+    """
+    The account's fills from since, in seconds since 1970.
+    """
+    return hyperliquid.user_fills(hyperliquid.ACCOUNT_FILE.read_text().strip(), since)
+
+
 async def refresh_balance(brakes):
     brakes.balance = await asyncio.to_thread(read_balance)
 
@@ -124,7 +132,8 @@ async def refresh_balance(brakes):
 async def settle(conn, executor, brakes, dry_run=False):
     """
     Settle the live trades and opportunities of the windows closed that Hyperliquid has settled, then, when trades that
-    held contracts settled, read the balance with their payouts and see whether live trading should halt.
+    held contracts settled, read the balance with their payouts and see whether live trading should halt, and read the
+    account's fills for when Hyperliquid filled each order, see executor.time_fills(), off the orders' own path.
     """
     due = time.time() - PAYOUT_SECONDS
     trades = database.unsettled_trades(conn, now=due)
@@ -137,6 +146,9 @@ async def settle(conn, executor, brakes, dry_run=False):
     if executor.settle(settled) and not dry_run:
         await refresh_balance(brakes)
         brakes.check_results()
+        since = time.time() - FILLS_SECONDS
+        if database.untimed_orders(conn, since):
+            executor.time_fills(await asyncio.to_thread(read_fills, since - 60), since)
 
 
 def status(conn, trader, brakes):

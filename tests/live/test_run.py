@@ -5,6 +5,7 @@ stand-ins for Hyperliquid.
 
 import asyncio
 import pytest
+import time
 from types import SimpleNamespace
 from upordowntrader.api import hyperliquid
 from upordowntrader.db import database
@@ -81,6 +82,8 @@ def test_settling_pays_the_trades_and_opportunities_hyperliquid_settled_then_rea
     monkeypatch.setattr(hyperliquid, "settlements", lambda: [Market("hyperliquid", "#1230", "x", "out-BTC-15m", 100, 1000, 80_000.0, None,
                                                                     "yes", 1008.0)])
     monkeypatch.setattr(run, "read_balance", lambda: 104.0)
+    monkeypatch.setattr(run, "read_fills", lambda since: [{"oid": 4, "time": 1_000_500}, {"oid": 4, "time": 1_000_200}, {"oid": 5, "time": 9}])
+    database.update(conn, "orders", 1, {"sent_at": time.time() - 100})
     checked = []
     brakes = SimpleNamespace(balance=None, check_results=lambda: checked.append(brakes.balance))
     asyncio.run(run.settle(conn, Executor(conn, log=lambda line: None), brakes))
@@ -88,6 +91,7 @@ def test_settling_pays_the_trades_and_opportunities_hyperliquid_settled_then_rea
     assert s["profit"] == pytest.approx(10 * (1 - hyperliquid.SETTLE_FEE_RATE) - 4.0) and checked == [104.0]
     assert database.load_opportunities(conn, mode="live")[0]["actual_profit"] == pytest.approx(10 * (1 - hyperliquid.SETTLE_FEE_RATE) - 4.0)
     assert database.load_opportunities(conn, mode="paper") == []
+    assert database.load_orders(conn, 1)[0]["venue_at"] == 1000.2        # Hyperliquid's time for the order's first fill.
 
 
 def test_live_trading_will_not_start_on_a_key_file_that_holds_an_address_and_says_so_without_showing_it(tmp_path, monkeypatch):

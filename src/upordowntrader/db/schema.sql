@@ -244,7 +244,11 @@ CREATE TABLE IF NOT EXISTS orders (
     note           TEXT,               -- Why the venue refused the order, or the error.
     response       TEXT,               -- The venue's answer as JSON, for reconciling.
     book_at        REAL,               -- The venue's time for the market's newest book when the order went out.
-    book_ts        REAL                -- When that book reached us. sent_at less it is how stale the book was.
+    book_ts        REAL,               -- When that book reached us. sent_at less it is how stale the book was.
+    venue_at       REAL                -- The venue's time for the order's first fill, so venue_at less sent_at is how long it
+                                       -- took to reach the venue's book: on Hyperliquid from the account's fills, read as its
+                                       -- window settles. Null for one that filled nothing, or until read. Added after the
+                                       -- table was made, see database.ADDED_COLUMNS.
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_trade ON orders (trade_id);

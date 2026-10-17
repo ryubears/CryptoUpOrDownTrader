@@ -128,6 +128,29 @@ def live_orders(conn, since=0.0):
     return [live_order(t, settled.get(t["id"])) for t in database.load_trades(conn, "mode = 'live' AND signal_ts >= ?", (since,))]
 
 
+def milliseconds(values):
+    """
+    The median and the 90th percentile of durations in seconds, in milliseconds, for a table cell, or dashes without any.
+    """
+    values = [v for v in values if v is not None]
+    return (f"{1000 * quantile(values, 0.5):,.0f}", f"{1000 * quantile(values, 0.9):,.0f}", f"{len(values):,}") if values else ("-", "-", "0")
+
+
+def report_latency(orders, log=print):
+    """
+    Print how long the live orders took, see database.load_live_latency(), at the median and the 90th percentile: how old
+    the venue's book was when it reached us, by the venue's time against ours, from deciding to sending, from sending to
+    the venue's first fill, and from sending to its answer.
+    """
+    if not orders:
+        return
+    body = [("book's age as it reached us", *milliseconds(o["book_ts"] - o["book_at"] for o in orders if o["book_at"] is not None)),
+            ("decided to sent", *milliseconds(o["sent_at"] - o["signal_ts"] for o in orders)),
+            ("sent to the venue's fill", *milliseconds(o["venue_at"] - o["sent_at"] for o in orders if o["venue_at"] is not None)),
+            ("sent to its answer", *milliseconds(o["answered_at"] - o["sent_at"] for o in orders if o["answered_at"] is not None))]
+    print_table("live orders' latency, in milliseconds", ("from", "median", "90th pct", "orders"), body, log)
+
+
 def report(orders, log=print, windows=None, kind="paper"):
     """
     Print the report of the orders of a kind, 'paper' or 'live', as dicts of the paper_orders columns, see live_order().
@@ -323,4 +346,6 @@ if __name__ == "__main__":
             continue                                # No live trading yet.
         print(f"\n==== {kind} trading")
         report(orders, windows=priced(opportunities) or None, kind=kind)
+        if kind == "live":
+            report_latency(database.load_live_latency(conn, since))
         report_opportunities(opportunities, label)

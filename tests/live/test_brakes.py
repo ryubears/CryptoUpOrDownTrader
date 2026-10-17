@@ -122,7 +122,8 @@ def test_an_order_of_unknown_outcome_halts_at_once_and_three_refusals_in_a_row_d
         database.store_order(b.conn, {"trade_id": trade_id, "venue": "hyperliquid", "ticker": "#1", "coin": "#1", "action": "buy",
                                       "outcome": "yes", "quantity": 10.0, "limit_price": 0.5, "tif": "Ioc", "client_id": "0x1", "sent_at": NOW,
                                       "status": status, "venue_order_id": None, "answered_at": NOW, "latency_ms": 100, "filled": 0.0,
-                                      "dollars": 0.0, "fees": 0.0, "note": None, "response": None, "book_at": None, "book_ts": None})
+                                      "dollars": 0.0, "fees": 0.0, "note": None, "response": None, "book_at": None, "book_ts": None,
+                                      "venue_at": None})
         b.watch(Placed(trade_id, status, 0.0, None, "Insufficient balance."))
 
     for status in ("rejected", "rejected", "unfilled", "rejected", "rejected"):

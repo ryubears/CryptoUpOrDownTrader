@@ -241,3 +241,16 @@ def test_live_trades_are_reported_apart_from_paper_orders_read_as_they_are(tmp_p
     lines = []
     report.report([], lines.append, kind="live")
     assert lines == ["no live orders yet, see upordowntrader.live.run"]
+
+
+def test_the_live_orders_latency_is_reported_by_stage_at_the_median_and_90th_percentile():
+    orders = [{"signal_ts": 100.0 + k, "book_at": 99.6 + k, "book_ts": 100.0 + k, "sent_at": 100.01 + k, "answered_at": 100.2 + k,
+               "venue_at": 100.1 + k if k else None, "filled": 10.0 if k else 0.0} for k in range(3)]
+    lines = []
+    report.report_latency(orders, lines.append)
+    text = "\n".join(lines)
+    assert "live orders' latency, in milliseconds" in text
+    assert [line.split()[-3:] for line in lines[2:]] == [["400", "400", "3"], ["10", "10", "3"], ["90", "90", "2"], ["190", "190", "3"]]
+    lines = []
+    report.report_latency([], lines.append)
+    assert lines == []

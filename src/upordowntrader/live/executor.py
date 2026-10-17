@@ -98,7 +98,7 @@ class Executor:
                                                     "limit_price": d["limit_price"], "tif": "Ioc", "client_id": cloid, "sent_at": sent,
                                                     "status": "sent", "venue_order_id": None, "answered_at": None, "latency_ms": None,
                                                     "filled": 0.0, "dollars": 0.0, "fees": 0.0, "note": None, "response": None,
-                                                    "book_at": d.get("book_at"), "book_ts": d.get("book_ts")})
+                                                    "book_at": d.get("book_at"), "book_ts": d.get("book_ts"), "venue_at": None})
         response = None
         try:
             response = self.place(coin, True, d["limit_price"], d["quantity"], "Ioc", cloid)
@@ -126,6 +126,22 @@ class Executor:
         self.log(f"live hyperliquid {d['side']} {d['ticker']}: {d['quantity']:g} to {d['limit_price']:.4f}, {took}, "
                  f"{round(1000 * (answered - sent))} ms")
         return Placed(trade_id, status, filled, price, why)
+
+    def time_fills(self, fills, since):
+        """
+        Give each order sent at or after since that filled the venue's time for its first fill, from fills, the
+        account's fills as hyperliquid.user_fills() reads them. Returns how many were timed.
+        """
+        first = {}
+        for f in fills:
+            oid = str(f.get("oid"))
+            first[oid] = min(first.get(oid, f["time"]), f["time"])
+        done = 0
+        for o in database.untimed_orders(self.conn, since):
+            if o["venue_order_id"] in first:
+                database.update(self.conn, "orders", o["id"], {"venue_at": first[o["venue_order_id"]] / 1000})
+                done += 1
+        return done
 
     def settle(self, markets):
         """
